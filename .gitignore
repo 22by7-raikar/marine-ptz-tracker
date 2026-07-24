@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Local configuration and editor files
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+
+# Runtime data and generated artifacts
+data/
+datasets/
+models/
+weights/
+videos/
+captures/
+logs/
+runs/
+training-runs/
+artifacts/
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+*.bag
+
+# Arduino / PlatformIO build output
+firmware/**/.pio/
+firmware/**/build/

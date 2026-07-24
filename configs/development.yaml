@@ -1,0 +1,23 @@
+# Safe local defaults. This configuration must not open physical hardware.
+runtime:
+  mode: development
+  telemetry_enabled: true
+
+camera:
+  source: synthetic
+  width: 1920
+  height: 1080
+  fps: 30
+
+detection:
+  backend: stub
+  confidence_threshold: 0.60
+  target_labels:
+    - boat
+
+actuator:
+  backend: simulated
+  pan_limits_deg: [20.0, 160.0]
+  tilt_limits_deg: [35.0, 145.0]
+  initial_pan_deg: 90.0
+  initial_tilt_deg: 90.0

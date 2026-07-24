@@ -1,0 +1,29 @@
+# Intended deployment values. Verify device paths and calibrated limits before use.
+runtime:
+  mode: hardware
+  telemetry_enabled: true
+
+camera:
+  source: v4l2
+  device: /dev/video0
+  width: 1920
+  height: 1080
+  fps: 30
+
+detection:
+  backend: pending_model_selection
+  confidence_threshold: 0.60
+  target_labels:
+    - boat
+
+serial:
+  device: /dev/ttyACM0
+  baudrate: 115200
+  timeout_s: 0.25
+
+actuator:
+  backend: arduino_serial
+  pan_limits_deg: [20.0, 160.0]
+  tilt_limits_deg: [35.0, 145.0]
+  initial_pan_deg: 90.0
+  initial_tilt_deg: 90.0
