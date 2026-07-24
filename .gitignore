@@ -19,6 +19,10 @@ env/
 .env
 .env.*
 !.env.example
+secrets/
+*.pem
+*.key
+*.token
 .vscode/
 .idea/
 
@@ -29,6 +33,9 @@ models/
 weights/
 videos/
 captures/
+*.mp4
+*.mov
+*.mkv
 logs/
 runs/
 training-runs/
@@ -38,6 +45,8 @@ artifacts/
 *.onnx
 *.engine
 *.tflite
+*.safetensors
+*.h5
 *.bag
 
 # Arduino / PlatformIO build output

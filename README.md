@@ -33,6 +33,6 @@ python3.10 -m pytest
 
 ## Configuration
 
-`configs/development.yaml` is safe for development: it uses synthetic inputs and a simulated actuator. `configs/hardware.yaml` records intended hardware values and must be reviewed against actual camera and serial-device discovery before use. Neither configuration starts hardware on its own.
+`configs/development.yaml` is safe for development: it declares the intended synthetic-camera and simulated-actuator backend selections. Those backend implementations are not included yet. `configs/hardware.yaml` records intended hardware values and must be reviewed against actual camera and serial-device discovery before use. Neither configuration starts hardware on its own.
 
 See [architecture](docs/architecture.md), [wiring](docs/wiring.md), and the [test plan](docs/test_plan.md) before connecting equipment.
