@@ -7,6 +7,22 @@ from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
+class AngleLimits:
+    """Inclusive minimum and maximum angle for one servo axis."""
+
+    minimum_deg: float
+    maximum_deg: float
+
+    def clamp(self, value: float) -> float:
+        """Clamp an angle to this range."""
+        return min(self.maximum_deg, max(self.minimum_deg, value))
+
+    def contains(self, value: float) -> bool:
+        """Return whether an angle is inside this range."""
+        return self.minimum_deg <= value <= self.maximum_deg
+
+
+@dataclass(frozen=True, slots=True)
 class Frame:
     """One captured image and its capture-time metadata."""
 

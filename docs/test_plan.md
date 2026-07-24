@@ -2,8 +2,9 @@
 
 ## Current repository checks
 
-- Run `python3.10 tools/smoke_check.py` to compile and import the package with no hardware.
-- Run `python3.10 -m pytest` after installing the optional test dependency. Tests must rely on fakes only.
+- Run `python -m compileall -q src tests tools` to compile the package and checks.
+- Run `python -m pytest` for configuration, synthetic source, tracking policy, actuator, and domain-value tests. Tests require no hardware.
+- Run `PYTHONPATH=src python -m marine_ptz.demo --config configs/development.yaml --steps 20 --no-sleep` for the deterministic vertical-slice demonstration.
 
 ## Bench sequence after hardware arrives
 
@@ -19,6 +20,6 @@
 
 - target label/model and detection confidence threshold;
 - maximum allowed command rate and serial timeout behavior;
-- lost-target behavior;
+- hardware lost-target behavior (the synthetic implementation supports hold and return-to-neutral);
 - calibrated servo limits and neutral position; and
 - acceptable tracking latency and target reacquisition behavior.

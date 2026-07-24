@@ -21,3 +21,10 @@ actuator:
   tilt_limits_deg: [35.0, 145.0]
   initial_pan_deg: 90.0
   initial_tilt_deg: 90.0
+
+tracking:
+  deadband_px: 24.0
+  proportional_gain: 8.0
+  max_step_deg: 3.0
+  update_rate_hz: 10.0
+  lost_target_behavior: hold

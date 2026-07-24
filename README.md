@@ -6,33 +6,41 @@ The laptop owns capture, detection, target selection, control, telemetry, and se
 
 ## Status
 
-Repository bootstrap only. The camera, Arduino, and external 5 V / 3 A servo supply are not yet connected. Detection models and the tracking loop are deliberately out of scope for this initial structure.
+The first hardware-independent vertical slice is implemented: a synthetic camera and target detector feed target selection, proportional tracking control, and a simulated PTZ actuator. The camera, Arduino, and external 5 V / 3 A servo supply are not yet connected, and no real camera, detector, serial, or firmware backend exists.
 
 ## Layout
 
-- `src/marine_ptz`: typed domain values and hardware-independent interfaces.
+- `src/marine_ptz`: typed configuration, domain values, interfaces, synthetic sources, tracking policy, simulated actuation, and demo composition.
 - `configs`: development defaults and hardware deployment values.
 - `firmware/ptz_controller`: Arduino firmware contract and implementation area.
 - `docs`: architecture, wiring, bill of materials, tests, and decisions.
 - `tests`: hardware-free unit and smoke tests.
 - `tools`: local verification helpers.
 
-## Quick check
+## Synthetic demo
 
-Python 3.10+ is required. No package installation is needed for the built-in smoke check:
+Python 3.10+ is required. From an environment with the project dependencies installed, run:
 
 ```bash
-python3.10 tools/smoke_check.py
+PYTHONPATH=src python -m marine_ptz.demo --config configs/development.yaml --steps 20
 ```
 
-For unit tests, install the optional development dependency in an environment outside the repository (or an ignored `.venv`) and run:
+Use `--no-sleep` for a deterministic run without real-time pacing:
 
 ```bash
-python3.10 -m pytest
+PYTHONPATH=src python -m marine_ptz.demo --config configs/development.yaml --steps 20 --no-sleep
+```
+
+Run the hardware-independent checks with:
+
+```bash
+python -m compileall -q src tests tools
+python -m pytest
+python tools/smoke_check.py
 ```
 
 ## Configuration
 
-`configs/development.yaml` is safe for development: it declares the intended synthetic-camera and simulated-actuator backend selections. Those backend implementations are not included yet. `configs/hardware.yaml` records intended hardware values and must be reviewed against actual camera and serial-device discovery before use. Neither configuration starts hardware on its own.
+`configs/development.yaml` selects the implemented synthetic camera and simulated actuator. `configs/hardware.yaml` records intended hardware values but has no corresponding real backends yet; it must be reviewed against actual camera and serial-device discovery before future use. Neither configuration starts hardware on its own.
 
 See [architecture](docs/architecture.md), [wiring](docs/wiring.md), and the [test plan](docs/test_plan.md) before connecting equipment.
