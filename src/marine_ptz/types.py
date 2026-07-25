@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
+from math import isfinite
+from numbers import Real
+
+
+def _finite_float(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise ValueError(f"{field_name} must be a finite number")
+    number = float(value)
+    if not isfinite(number):
+        raise ValueError(f"{field_name} must be a finite number")
+    return number
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,9 +34,15 @@ class AngleLimits:
 
 @dataclass(frozen=True, slots=True)
 class Frame:
-    """One captured image and its capture-time metadata."""
+    """One captured frame and its capture-time metadata.
 
-    image: Any
+    ``image`` is intentionally opaque so synthetic callers can use a lightweight
+    marker while real sources can supply an OpenCV/NumPy array without making
+    NumPy a base-package dependency. Image identity and content are excluded
+    from equality, hashing, and repr; frame metadata defines value equality.
+    """
+
+    image: object | None = field(compare=False, hash=False, repr=False)
     timestamp_s: float
     width: int
     height: int
@@ -44,10 +60,32 @@ class Detection:
     right: float
     bottom: float
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.label, str) or not self.label.strip():
+            raise ValueError("detection.label must be a non-empty string")
+        object.__setattr__(self, "label", self.label.strip())
+        for field_name in ("confidence", "left", "top", "right", "bottom"):
+            object.__setattr__(
+                self,
+                field_name,
+                _finite_float(getattr(self, field_name), f"detection.{field_name}"),
+            )
+        if not 0.0 <= self.confidence <= 1.0:
+            raise ValueError("detection.confidence must be between 0 and 1")
+        if self.right <= self.left:
+            raise ValueError("detection bounding box width must be greater than zero")
+        if self.bottom <= self.top:
+            raise ValueError("detection bounding box height must be greater than zero")
+
     @property
     def center(self) -> tuple[float, float]:
         """Return the bounding-box center in pixels."""
         return ((self.left + self.right) / 2, (self.top + self.bottom) / 2)
+
+    @property
+    def area(self) -> float:
+        """Return bounding-box area in square pixels."""
+        return max(0.0, self.right - self.left) * max(0.0, self.bottom - self.top)
 
 
 @dataclass(frozen=True, slots=True)

@@ -3,7 +3,7 @@
 ## Current repository checks
 
 - Run `python -m compileall -q src tests tools` to compile the package and checks.
-- Run `python -m pytest` for configuration, synthetic source, tracking policy, actuator, and domain-value tests. Tests require no hardware.
+- Run `python -m pytest` for configuration, synthetic and OpenCV sources, YOLO result conversion, device policy, marine target selection, tracking, actuation, and cleanup tests. Tests require no hardware, model weights, display, network, or CUDA.
 - Run `PYTHONPATH=src python -m marine_ptz.demo --config configs/development.yaml --steps 20 --no-sleep` for the deterministic vertical-slice demonstration.
 
 ## Bench sequence after hardware arrives
@@ -23,3 +23,7 @@
 - hardware lost-target behavior (the synthetic implementation supports hold and return-to-neutral);
 - calibrated servo limits and neutral position; and
 - acceptable tracking latency and target reacquisition behavior.
+
+Before camera bench testing, run the vision CLI against a local video with
+`--device cpu --max-frames N` and a local model path. Host CUDA validation is a
+separate manual test because the coding-agent sandbox may not expose the GPU.

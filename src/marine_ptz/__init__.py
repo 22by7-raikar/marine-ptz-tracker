@@ -4,7 +4,11 @@ from .actuators import SimulatedPTZActuator
 from .config import AppConfig, ConfigError, TrackingConfig, load_config
 from .interfaces import Actuator, CameraSource, Detector, PTZController, TargetSelector
 from .synthetic import SyntheticCamera, SyntheticTargetDetector
-from .tracking import HighestConfidenceTargetSelector, ProportionalPTZController
+from .tracking import (
+    HighestConfidenceTargetSelector,
+    MarineTargetSelector,
+    ProportionalPTZController,
+)
 from .types import AngleLimits, Detection, Frame, PTZCommand, Target
 
 __all__ = [
@@ -17,6 +21,7 @@ __all__ = [
     "Detector",
     "Frame",
     "HighestConfidenceTargetSelector",
+    "MarineTargetSelector",
     "PTZCommand",
     "PTZController",
     "ProportionalPTZController",

@@ -1,0 +1,324 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import pytest
+
+import marine_ptz.yolo_detector as yolo_detector
+from marine_ptz.interfaces import Detector
+from marine_ptz.types import Frame
+from marine_ptz.yolo_detector import (
+    InferenceDeviceError,
+    UltralyticsDependencyError,
+    UltralyticsDetector,
+    resolve_inference_device,
+)
+
+
+class FakeCuda:
+    def __init__(self, available: bool, count: int = 1) -> None:
+        self._available = available
+        self._count = count
+
+    def is_available(self) -> bool:
+        return self._available
+
+    def device_count(self) -> int:
+        return self._count
+
+
+class FakeBoxes:
+    def __init__(
+        self,
+        xyxy: object,
+        confidence: object,
+        classes: object,
+    ) -> None:
+        self.xyxy = xyxy
+        self.conf = confidence
+        self.cls = classes
+
+
+class FakeResult:
+    def __init__(self, boxes: object, names: object) -> None:
+        self.boxes = boxes
+        self.names = names
+
+
+class FakeModel:
+    def __init__(self, results: list[FakeResult], names: object) -> None:
+        self.results = results
+        self.names = names
+        self.calls: list[dict[str, object]] = []
+
+    def predict(self, **kwargs: object) -> list[FakeResult]:
+        self.calls.append(kwargs)
+        return self.results
+
+
+class FakeTensor:
+    def __init__(self, converted: object) -> None:
+        self.converted = converted
+        self.calls: list[str] = []
+
+    def detach(self) -> FakeTensor:
+        self.calls.append("detach")
+        return self
+
+    def cpu(self) -> FakeTensor:
+        self.calls.append("cpu")
+        return self
+
+    def tolist(self) -> object:
+        self.calls.append("tolist")
+        return self.converted
+
+
+def image_frame(width: int = 100, height: int = 80) -> Frame:
+    return Frame(object(), 1.0, width, height, 0)
+
+
+@pytest.mark.parametrize(
+    ("available", "requested", "expected"),
+    [
+        (False, "auto", "cpu"),
+        (True, "auto", "cuda:0"),
+        (False, "cpu", "cpu"),
+        (True, "cuda", "cuda:0"),
+        (True, "cuda:1", "cuda:1"),
+    ],
+)
+def test_device_resolution(
+    available: bool,
+    requested: str,
+    expected: str,
+) -> None:
+    torch = SimpleNamespace(cuda=FakeCuda(available, count=2))
+
+    assert resolve_inference_device(requested, torch_module=torch) == expected
+
+
+def test_explicit_unavailable_cuda_fails_clearly() -> None:
+    torch = SimpleNamespace(cuda=FakeCuda(False))
+
+    with pytest.raises(InferenceDeviceError, match="CUDA is unavailable"):
+        resolve_inference_device("cuda", torch_module=torch)
+
+
+def test_out_of_range_cuda_index_fails_clearly() -> None:
+    torch = SimpleNamespace(cuda=FakeCuda(True, count=1))
+
+    with pytest.raises(InferenceDeviceError, match="only 1 CUDA"):
+        resolve_inference_device("cuda:2", torch_module=torch)
+
+
+def test_result_conversion_uses_model_names_filters_and_clamps() -> None:
+    names = {0: "person", 8: "boat"}
+    model = FakeModel(
+        [
+            FakeResult(
+                FakeBoxes(
+                    [
+                        [-10.0, 5.0, 120.0, 90.0],
+                        [10.0, 10.0, 30.0, 30.0],
+                        [20.0, 20.0, 40.0, 40.0],
+                    ],
+                    [0.90, 0.99, 0.40],
+                    [8.0, 0.0, 8.0],
+                ),
+                names,
+            )
+        ],
+        names,
+    )
+    timestamps = iter((4.0, 4.012))
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cpu",
+        confidence_threshold=0.50,
+        iou_threshold=0.30,
+        image_size=320,
+        class_names=("boat",),
+        model_factory=lambda name: model,
+        clock=lambda: next(timestamps),
+    )
+
+    detections = detector.detect(image_frame())
+
+    assert isinstance(detector, Detector)
+    assert len(detections) == 1
+    assert detections[0].label == "boat"
+    assert detections[0].confidence == 0.90
+    assert (
+        detections[0].left,
+        detections[0].top,
+        detections[0].right,
+        detections[0].bottom,
+    ) == (0.0, 5.0, 100.0, 80.0)
+    assert detector.last_inference_ms == pytest.approx(12.0)
+    assert model.calls[0]["classes"] == [8]
+    assert model.calls[0]["device"] == "cpu"
+    assert model.calls[0]["imgsz"] == 320
+
+
+@pytest.mark.parametrize(
+    ("box", "confidence", "class_id"),
+    [
+        ([0.0, 0.0, 10.0, 10.0], float("nan"), 8.0),
+        ([0.0, 0.0, float("inf"), 10.0], 0.9, 8.0),
+        ([0.0, 0.0, 10.0, 10.0], 0.9, float("-inf")),
+        ([10.0, 10.0, 10.0, 20.0], 0.9, 8.0),
+        ([20.0, 20.0, 10.0, 30.0], 0.9, 8.0),
+        ([-10.0, -10.0, -1.0, -1.0], 0.9, 8.0),
+    ],
+)
+def test_malformed_nonfinite_and_zero_area_boxes_are_discarded(
+    box: list[float],
+    confidence: float,
+    class_id: float,
+) -> None:
+    names = {8: "boat"}
+    model = FakeModel(
+        [FakeResult(FakeBoxes([box], [confidence], [class_id]), names)],
+        names,
+    )
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cpu",
+        class_names=("boat",),
+        model_factory=lambda name: model,
+    )
+
+    assert detector.detect(image_frame()) == ()
+
+
+def test_absent_requested_class_skips_inference() -> None:
+    model = FakeModel([], {0: "person"})
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cpu",
+        class_names=("boat",),
+        model_factory=lambda name: model,
+    )
+
+    assert detector.detect(image_frame()) == ()
+    assert model.calls == []
+
+
+def test_sequence_model_names_and_case_insensitive_matching() -> None:
+    names = ["person", "BoAt"]
+    model = FakeModel(
+        [
+            FakeResult(
+                FakeBoxes([[1.0, 2.0, 11.0, 12.0]], [0.9], [1.0]),
+                names,
+            )
+        ],
+        names,
+    )
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cpu",
+        class_names=("bOaT",),
+        model_factory=lambda name: model,
+    )
+
+    detections = detector.detect(image_frame())
+
+    assert len(detections) == 1
+    assert detections[0].label == "BoAt"
+    assert model.calls[0]["classes"] == [1]
+
+
+def test_gpu_like_tensors_are_detached_moved_to_cpu_and_converted() -> None:
+    coordinates = FakeTensor([[1.0, 2.0, 11.0, 12.0]])
+    confidences = FakeTensor([0.9])
+    classes = FakeTensor([8.0])
+    model = FakeModel(
+        [
+            FakeResult(
+                FakeBoxes(coordinates, confidences, classes),
+                {8: "boat"},
+            )
+        ],
+        {8: "boat"},
+    )
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cpu",
+        class_names=("boat",),
+        model_factory=lambda name: model,
+    )
+
+    detections = detector.detect(image_frame())
+
+    assert len(detections) == 1
+    assert detections[0].left == 1.0
+    assert all(
+        tensor.calls == ["detach", "cpu", "tolist"]
+        for tensor in (coordinates, confidences, classes)
+    )
+    assert not any(
+        isinstance(value, FakeTensor)
+        for detection in detections
+        for value in (
+            detection.confidence,
+            detection.left,
+            detection.top,
+            detection.right,
+            detection.bottom,
+        )
+    )
+
+
+def test_duplicate_tied_results_are_preserved_in_source_order() -> None:
+    boxes = FakeBoxes(
+        [[1.0, 2.0, 11.0, 12.0], [1.0, 2.0, 11.0, 12.0]],
+        [0.9, 0.9],
+        [8.0, 8.0],
+    )
+    model = FakeModel([FakeResult(boxes, {8: "boat"})], {8: "boat"})
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cpu",
+        class_names=("boat",),
+        model_factory=lambda name: model,
+    )
+
+    detections = detector.detect(image_frame())
+
+    assert len(detections) == 2
+    assert detections[0] == detections[1]
+
+
+@pytest.mark.parametrize(
+    "boxes",
+    [
+        None,
+        SimpleNamespace(xyxy=object(), conf=[0.9], cls=[8.0]),
+        SimpleNamespace(xyxy=[[0.0, 0.0, 10.0]], conf=[0.9], cls=[8.0]),
+        SimpleNamespace(xyxy=[[0.0, 0.0, 10.0, 10.0]], conf=object(), cls=[8.0]),
+    ],
+)
+def test_malformed_result_structures_are_discarded(boxes: object) -> None:
+    model = FakeModel([FakeResult(boxes, {8: "boat"})], {8: "boat"})
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cpu",
+        class_names=("boat",),
+        model_factory=lambda name: model,
+    )
+
+    assert detector.detect(image_frame()) == ()
+
+
+def test_missing_ultralytics_has_clear_lazy_dependency_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing(name: str) -> object:
+        raise UltralyticsDependencyError(f"{name} missing")
+
+    monkeypatch.setattr(yolo_detector, "_load_module", missing)
+
+    with pytest.raises(UltralyticsDependencyError, match="ultralytics missing"):
+        UltralyticsDetector("fake.pt", device="cpu")

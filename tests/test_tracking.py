@@ -1,4 +1,5 @@
 import pytest
+from types import SimpleNamespace
 
 from marine_ptz.config import TrackingConfig
 from marine_ptz.tracking import ProportionalPTZController
@@ -138,3 +139,35 @@ def test_lost_target_at_servo_limits_remains_bounded(
         assert command.pan_deg == command.tilt_deg == 85.0
     else:
         assert command.pan_deg == command.tilt_deg == 95.0
+
+
+@pytest.mark.parametrize("invalid", [float("nan"), float("inf"), float("-inf")])
+def test_malformed_duck_typed_target_cannot_move_hold_controller(invalid: float) -> None:
+    ptz = controller(settings(lost_target_behavior="hold"), pan=95.0, tilt=85.0)
+    malformed = SimpleNamespace(
+        detection=SimpleNamespace(center=(invalid, 300.0)),
+        frame_sequence=1,
+    )
+
+    command = ptz.command_for(frame(), malformed)  # type: ignore[arg-type]
+
+    assert command.pan_deg == 95.0
+    assert command.tilt_deg == 85.0
+
+
+def test_malformed_target_uses_return_to_neutral_policy() -> None:
+    ptz = controller(
+        settings(max_step_deg=2.0, lost_target_behavior="return_to_neutral"),
+        pan=95.0,
+        tilt=85.0,
+    )
+    ptz.command_for(frame(), target_at(1000.0, 0.0))
+    malformed = SimpleNamespace(
+        detection=SimpleNamespace(center=("not-a-number", None)),
+        frame_sequence=2,
+    )
+
+    command = ptz.command_for(frame(sequence=2), malformed)  # type: ignore[arg-type]
+
+    assert command.pan_deg == 95.0
+    assert command.tilt_deg == 85.0

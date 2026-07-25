@@ -1,0 +1,3 @@
+# Apply only after installing the verified pair from the official PyTorch cu128 index.
+torch==2.11.0+cu128
+torchvision==0.26.0+cu128

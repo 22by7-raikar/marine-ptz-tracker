@@ -11,8 +11,12 @@ camera:
   fps: 30
 
 detection:
-  backend: pending_model_selection
+  backend: ultralytics
+  model: yolo11n.pt
+  device: auto
   confidence_threshold: 0.60
+  iou_threshold: 0.45
+  image_size: 640
   target_labels:
     - boat
 

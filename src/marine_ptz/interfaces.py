@@ -12,7 +12,11 @@ class CameraSource(Protocol):
     """Supplies frames; concrete implementations may own camera resources."""
 
     def read(self) -> Frame | None:
-        """Return the next frame, or None when no frame is currently available."""
+        """Return the next frame or None at evidence-backed finite-media EOF.
+
+        Live-source failures and finite-media failures that cannot be identified
+        as normal EOF should raise an implementation-specific error.
+        """
 
     def close(self) -> None:
         """Release resources owned by this source."""

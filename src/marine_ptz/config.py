@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
+import re
 from typing import Any, Mapping
 
 import yaml
@@ -36,6 +37,10 @@ class DetectionConfig:
     backend: str
     confidence_threshold: float
     target_labels: tuple[str, ...]
+    model: str
+    device: str
+    iou_threshold: float
+    image_size: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,16 +160,46 @@ def _camera_config(data: Mapping[str, Any]) -> CameraConfig:
 
 def _detection_config(data: Mapping[str, Any]) -> DetectionConfig:
     path = "detection"
-    _only_keys(data, {"backend", "confidence_threshold", "target_labels"}, path)
+    _only_keys(
+        data,
+        {
+            "backend",
+            "confidence_threshold",
+            "target_labels",
+            "model",
+            "device",
+            "iou_threshold",
+            "image_size",
+        },
+        path,
+    )
     threshold = _number(data, "confidence_threshold", path)
     if not 0 <= threshold <= 1:
         raise ConfigError("detection.confidence_threshold must be between 0 and 1")
+    iou_threshold = _optional_number(data, "iou_threshold", path, 0.45)
+    if not 0 <= iou_threshold <= 1:
+        raise ConfigError("detection.iou_threshold must be between 0 and 1")
+    image_size = _optional_integer(data, "image_size", path, 640)
+    if image_size <= 0:
+        raise ConfigError("detection.image_size must be greater than zero")
+    model = _optional_string(data, "model", path, "yolo11n.pt")
+    device = _optional_string(data, "device", path, "auto")
+    if not re.fullmatch(r"(?:auto|cpu|cuda(?::\d+)?)", device):
+        raise ConfigError("detection.device must be auto, cpu, cuda, or cuda:N")
     raw_labels = data.get("target_labels")
     if not isinstance(raw_labels, list) or not raw_labels:
         raise ConfigError("detection.target_labels must be a non-empty list")
     if any(not isinstance(label, str) or not label.strip() for label in raw_labels):
         raise ConfigError("detection.target_labels entries must be non-empty strings")
-    return DetectionConfig(_string(data, "backend", path), threshold, tuple(raw_labels))
+    return DetectionConfig(
+        _string(data, "backend", path),
+        threshold,
+        tuple(raw_labels),
+        model,
+        device,
+        iou_threshold,
+        image_size,
+    )
 
 
 def _actuator_config(data: Mapping[str, Any]) -> ActuatorConfig:
@@ -275,6 +310,17 @@ def _string(data: Mapping[str, Any], key: str, path: str) -> str:
     return value
 
 
+def _optional_string(
+    data: Mapping[str, Any],
+    key: str,
+    path: str,
+    default: str,
+) -> str:
+    if key not in data:
+        return default
+    return _string(data, key, path)
+
+
 def _boolean(data: Mapping[str, Any], key: str, path: str) -> bool:
     value = data.get(key)
     if not isinstance(value, bool):
@@ -284,6 +330,17 @@ def _boolean(data: Mapping[str, Any], key: str, path: str) -> bool:
 
 def _number(data: Mapping[str, Any], key: str, path: str) -> float:
     return _finite_number(data.get(key), f"{path}.{key}")
+
+
+def _optional_number(
+    data: Mapping[str, Any],
+    key: str,
+    path: str,
+    default: float,
+) -> float:
+    if key not in data:
+        return default
+    return _number(data, key, path)
 
 
 def _finite_number(value: Any, field: str) -> float:
@@ -300,6 +357,17 @@ def _integer(data: Mapping[str, Any], key: str, path: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ConfigError(f"{path}.{key} must be an integer")
     return value
+
+
+def _optional_integer(
+    data: Mapping[str, Any],
+    key: str,
+    path: str,
+    default: int,
+) -> int:
+    if key not in data:
+        return default
+    return _integer(data, key, path)
 
 
 def _limits(data: Mapping[str, Any], key: str, path: str) -> AngleLimits:

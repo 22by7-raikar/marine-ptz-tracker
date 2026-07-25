@@ -12,4 +12,7 @@
 | Jumper wires / suitable servo extension | Verify | Servo signals, common ground, and power distribution. |
 | Multimeter | Recommended | Required for polarity and supply-voltage checks. |
 
-No model, GPU framework, serial library, or camera SDK is selected yet.
+The software vision baseline is Ultralytics 8.4.104 with lightweight
+`yolo11n.pt`, Torch 2.11.0+cu128, torchvision 0.26.0+cu128, and
+opencv-python 5.0.0.93. Model weights are external artifacts and are not stored
+in Git. No serial library or camera-specific SDK is selected.
