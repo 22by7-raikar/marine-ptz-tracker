@@ -40,6 +40,8 @@ logs/
 runs/
 training-runs/
 artifacts/
+# Default generated benchmark reports; source fixtures belong under tests/.
+artifacts/benchmarks/
 *.pt
 *.pth
 *.onnx

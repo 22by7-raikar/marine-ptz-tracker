@@ -33,6 +33,7 @@ def test_package_import_and_synthetic_demo_do_not_import_vision_packages() -> No
 import sys
 optional = {optional_names}
 import marine_ptz
+import marine_ptz.benchmark
 assert not (set(optional) & set(sys.modules)), sorted(set(optional) & set(sys.modules))
 from marine_ptz.demo import main
 assert main([

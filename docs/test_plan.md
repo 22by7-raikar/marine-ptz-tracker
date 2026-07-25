@@ -3,8 +3,24 @@
 ## Current repository checks
 
 - Run `python -m compileall -q src tests tools` to compile the package and checks.
-- Run `python -m pytest` for configuration, synthetic and OpenCV sources, YOLO result conversion, device policy, marine target selection, tracking, actuation, and cleanup tests. Tests require no hardware, model weights, display, network, or CUDA.
+- Run `python -m pytest -m "not hardware and not gpu"` for the CI-equivalent suite: configuration, synthetic and OpenCV sources, YOLO conversion, device policy, target selection, tracking, actuation, cleanup, CI structure, and benchmark logic. Tests require no hardware, model weights, display, network, or CUDA.
 - Run `PYTHONPATH=src python -m marine_ptz.demo --config configs/development.yaml --steps 20 --no-sleep` for the deterministic vertical-slice demonstration.
+
+## Pytest categories
+
+- `unit` is the default for unmarked deterministic tests.
+- `integration` is reserved for hardware-free component integration through fakes.
+- `hardware` requires explicitly connected physical equipment and is opt-in with `python -m pytest -m hardware`.
+- `gpu` requires an explicitly available CUDA device and is opt-in with `python -m pytest -m gpu`.
+
+Unknown markers fail collection under `--strict-markers`. Unmarked tests receive
+the `unit` category automatically only when they do not already have a
+registered category marker.
+
+Ordinary CI runs `python -m pytest -m "not hardware and not gpu"`; it does not
+install the vision extra, access CUDA, or open a camera. It installs `.[dev]`
+through the reviewed lightweight `constraints/ci.txt` set. That file is not a
+hash-locked cross-platform supply-chain lockfile.
 
 ## Bench sequence after hardware arrives
 

@@ -1,5 +1,7 @@
 # Marine PTZ Tracker
 
+[![CI](https://github.com/22by7-raikar/marine-ptz-tracker/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/22by7-raikar/marine-ptz-tracker/actions/workflows/ci.yml)
+
 Foundation for a laptop-driven system that detects and follows a small marine target with a USB camera, a two-servo pan/tilt assembly, and an Arduino Uno.
 
 The laptop owns capture, detection, target selection, control, telemetry, and serial communication. The Arduino only validates bounded pan/tilt commands and drives the servos. Hardware is intentionally not accessed at import time.
@@ -39,8 +41,47 @@ Run the hardware-independent checks with:
 
 ```bash
 python -m compileall -q src tests tools
-python -m pytest
+python -m pytest -m "not hardware and not gpu"
 python tools/smoke_check.py
+```
+
+The CI-equivalent suite deliberately excludes opt-in hardware and GPU tests:
+
+```bash
+python -m pytest -m "not hardware and not gpu"
+```
+
+Pytest uses strict marker validation: only registered markers are accepted, so
+a typo fails collection instead of silently changing test selection. CI
+installs the base and development extras through `constraints/ci.txt`:
+
+```bash
+python -m pip install \
+  --constraint constraints/ci.txt \
+  --editable ".[dev]"
+```
+
+This is a reviewed lightweight CI constraint set, not a hash-locked
+supply-chain lockfile, and it does not promise identical resolution across
+operating systems or future package-index changes. The workflow pins the
+official checkout and Python setup actions to verified immutable v6 revisions.
+
+Run explicitly connected hardware or CUDA tests only when the required device
+is available:
+
+```bash
+python -m pytest -m hardware
+python -m pytest -m gpu
+```
+
+For full local validation, run compileall, the smoke check, the CI-equivalent
+suite, and dependency consistency checks:
+
+```bash
+python -m compileall -q src tests tools
+python tools/smoke_check.py
+python -m pytest -m "not hardware and not gpu"
+python -m pip check
 ```
 
 ## Verified vision environment
@@ -105,6 +146,27 @@ and `--max-frames N` for a finite run. Press `q` to leave display mode.
 pretrained weights when they are not already cached; pass a local model path
 when network-free startup is required. Model weights and generated recordings
 are ignored by Git.
+
+## Benchmarking
+
+The camera-free benchmark measures model loading and inference against either a
+local image or a deterministic blank frame. It does not command a servo or open
+a camera. Run it with a local model path when network-free startup is required:
+
+```bash
+python tools/benchmark_yolo.py \
+  --model /path/to/yolo11n.pt \
+  --device cuda:0 \
+  --image-size 640 \
+  --warmup 5 \
+  --iterations 30
+```
+
+JSON reports default to ignored `artifacts/benchmarks/`. Reports use strict,
+finite JSON, retain only allowlisted runtime metadata and a sanitized
+invocation, and replace existing reports atomically after a complete
+same-directory write is flushed to disk. See
+[benchmark methodology and preliminary results](docs/benchmarks.md).
 
 ## Configuration
 

@@ -33,7 +33,13 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "-q"
+addopts = "-q --strict-markers"
+markers = [
+    "unit: deterministic, hardware-free unit test (default for unmarked tests)",
+    "integration: hardware-free integration test using fakes or synthetic components",
+    "hardware: requires explicitly connected physical hardware",
+    "gpu: requires an explicitly available CUDA-capable GPU",
+]
 
 [tool.ruff]
 target-version = "py310"
