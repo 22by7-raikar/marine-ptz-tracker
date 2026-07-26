@@ -13,6 +13,7 @@ from typing import Any
 
 from .benchmark import (
     allowlisted_environment_metadata,
+    local_path_marker,
     percentile,
     sanitize_command,
     summarize_samples,
@@ -606,7 +607,7 @@ def _clock_value(clock: Callable[[], float]) -> float:
 
 
 def _safe_path(path: Path) -> str:
-    return path.name
+    return local_path_marker(str(path))
 
 
 def sanitize_replay_command(command: Sequence[str]) -> tuple[str, ...]:
@@ -618,7 +619,7 @@ def sanitize_replay_command(command: Sequence[str]) -> tuple[str, ...]:
         raw = str(raw_value)
         generic_value = generic[index]
         if path_value_next:
-            sanitized.append(_sanitize_replay_path(generic_value))
+            sanitized.append(local_path_marker(raw))
             path_value_next = False
             continue
         if raw in _PATH_ARGUMENTS:
@@ -626,32 +627,22 @@ def sanitize_replay_command(command: Sequence[str]) -> tuple[str, ...]:
             path_value_next = True
             continue
         if "=" in raw:
-            name, _value = raw.split("=", 1)
+            name, value = raw.split("=", 1)
             if name in _PATH_ARGUMENTS:
-                sanitized.append(f"{name}={_sanitize_replay_path(generic_value.split('=', 1)[1])}")
+                sanitized.append(f"{name}={local_path_marker(value)}")
                 continue
         sanitized.append(_sanitize_replay_path(generic_value) if _looks_local_path(raw) else generic_value)
     return tuple(sanitized)
 
 
 def _sanitize_replay_model(value: str) -> str:
-    generic = sanitize_command((value,))[0]
-    return _sanitize_replay_path(generic) if _looks_local_path(value) else generic
+    return sanitize_command(("--model", value))[1]
 
 
 def _sanitize_replay_path(value: str) -> str:
-    if value == "<redacted>":
+    if value == "<redacted>" or value.startswith(("<local-path:", "<remote-resource:")):
         return value
-    if value.startswith("path:"):
-        return f"path:{_local_path_marker(value[5:])}"
-    if _looks_local_path(value):
-        return _local_path_marker(value)
-    return value
-
-
-def _local_path_marker(value: str) -> str:
-    name = value.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1] or "path"
-    return f"<local-path:{name}>"
+    return local_path_marker(value)
 
 
 def _looks_local_path(value: str) -> bool:
@@ -670,7 +661,7 @@ def _sanitize_environment(values: Mapping[str, object]) -> dict[str, object]:
     sanitized: dict[str, object] = {}
     for name, value in allowlisted_environment_metadata(values).items():
         if isinstance(value, str):
-            sanitized[name] = _sanitize_replay_path(sanitize_command((value,))[0])
+            sanitized[name] = sanitize_command((value,))[0]
         else:
             sanitized[name] = value
     return sanitized

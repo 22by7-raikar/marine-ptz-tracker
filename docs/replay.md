@@ -23,13 +23,18 @@ atomically replaces the report path. Failures before that replacement preserve
 an existing report. Unavailable values are JSON `null`, never `NaN` or
 infinity.
 
-Replay sanitization builds on generic secret and URL redaction. It replaces
-local source, model, config, report, and annotated-output paths in either
-`--flag value` or `--flag=value` form with basename-only markers such as
-`<local-path:case1.mp4>`; `path:/...` inputs retain the `path:` marker without
-the directory. Named models such as `yolo11n.pt` remain identifiable. No path
-resolution is performed while serializing the report, and report metadata or
-diagnostics do not persist raw local paths.
+Replay sanitization builds on generic secret and URL redaction. The field type
+takes precedence over value syntax: path-typed `--source`, `--report`,
+`--config`, and `--annotated-output` values in either `--flag value` or
+`--flag=value` form always become basename-only `<local-path:basename>`
+markers, even when they look like URLs. Model fields preserve safe named
+identifiers such as `yolo11n.pt`, use `<local-path:basename>` for filesystem
+paths, and use `<remote-resource:basename>` for remote URLs. Marker derivation
+discards URL authority, credentials, query, and fragment. Empty, malformed, or
+encoded ambiguous basenames use the matching `...:redacted` marker. Reports are
+designed to be shareable, but must still be reviewed before publication. No
+path resolution is performed while serializing the report, and report metadata
+or diagnostics do not persist raw local paths.
 
 Definitions are deterministic:
 

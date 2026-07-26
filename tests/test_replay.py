@@ -8,7 +8,7 @@ import os
 from pathlib import Path
 import signal
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 
@@ -520,6 +520,246 @@ def test_complete_report_sanitizes_all_local_paths_and_preserves_safe_models(
     assert "<redacted>@example.com" in serialized
     assert "token=%3Credacted%3E" in serialized
     assert replay._sanitize_replay_model("yolo11n.pt") == "yolo11n.pt"
+
+
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    (
+        ("yolo11n.pt", "yolo11n.pt"),
+        ("/home/alice/models/custom.pt", "<local-path:custom.pt>"),
+        (
+            "https://user:password@models.example/private/custom.pt?token=secret#fragment",
+            "<remote-resource:custom.pt>",
+        ),
+        ("https://models.example", "<remote-resource:redacted>"),
+        (
+            "https://models.example/private/%253Ftoken%253Dsecret",
+            "<remote-resource:redacted>",
+        ),
+    ),
+)
+def test_replay_structured_model_uses_model_field_policy(model: str, expected: str) -> None:
+    assert replay._sanitize_replay_model(model) == expected
+
+
+def test_replay_path_typed_urls_are_marked_by_field_type() -> None:
+    source_url = "https://user:password@sources.example/private/frame.png?token=secret#fragment"
+    report_url = "file:///home/alice/private/result.json?token=secret#fragment"
+    config_url = "https://configs.example"
+    annotated_url = "https://writer:pass@outputs.example/private/annotated.mp4?key=secret#fragment"
+
+    assert replay.sanitize_replay_command(
+        (
+            "replay",
+            f"--source={source_url}",
+            "--report",
+            report_url,
+            f"--config={config_url}",
+            "--annotated-output",
+            annotated_url,
+        )
+    ) == (
+        "replay",
+        "--source=<local-path:frame.png>",
+        "--report",
+        "<local-path:result.json>",
+        "--config=<local-path:redacted>",
+        "--annotated-output",
+        "<local-path:annotated.mp4>",
+    )
+
+
+def test_replay_path_forced_url_values_keep_only_safe_url_path_basenames(
+    tmp_path: Path,
+) -> None:
+    remote_model = "path:https://user:pass@example.com/private/model.pt?token=secret#fragment"
+    file_source = "path:file:///home/alice/private/frame.png?token=secret#fragment"
+    report_path = "path:https://report-user:report-pass@reports.example/private/report.json?key=secret#fragment"
+    command = (
+        "marine-ptz-replay",
+        "--model",
+        remote_model,
+        f"--source={file_source}",
+        "--report",
+        report_path,
+    )
+
+    assert replay.sanitize_replay_command(command) == (
+        "marine-ptz-replay",
+        "--model",
+        "<local-path:model.pt>",
+        "--source=<local-path:frame.png>",
+        "--report",
+        "<local-path:report.json>",
+    )
+    assert replay.sanitize_replay_command(
+        (
+            "marine-ptz-replay",
+            "--model",
+            "path:/home/alice/models/model.pt",
+            "--source=path:../frames/frame.png",
+        )
+    ) == (
+        "marine-ptz-replay",
+        "--model",
+        "<local-path:model.pt>",
+        "--source=<local-path:frame.png>",
+    )
+
+    original = _report_for_path_privacy(tmp_path)
+    report = replace(
+        original,
+        command=command,
+        options=options(tmp_path, model=remote_model),
+    )
+    payload = report.to_dict()
+    _assert_replay_private_fragments_absent(
+        payload,
+        (
+            "user",
+            "pass",
+            "token",
+            "secret",
+            "fragment",
+            "example.com",
+            "reports.example",
+            "private",
+            "/home/alice",
+            "alice",
+        ),
+    )
+    serialized = json.dumps(payload, allow_nan=False, sort_keys=True)
+    assert "<local-path:model.pt>" in serialized
+    assert "<local-path:frame.png>" in serialized
+    assert "<local-path:report.json>" in serialized
+    assert replay._sanitize_replay_model("yolo11n.pt") == "yolo11n.pt"
+
+
+def test_replay_report_path_typed_urls_never_retain_url_structure(
+    tmp_path: Path,
+) -> None:
+    model_url = "https://model-user:model-pass@models.example/private/custom.pt?token=secret#fragment"
+    source_url = "https://source-user:source-pass@sources.example/private/frame.png?token=secret#fragment"
+    report_url = "file:///home/alice/private/result.json?%74oken=%73ecret#fragment"
+    config_url = "https://configs.example"
+    annotated_url = "https://output-user:output-pass@outputs.example/private/annotated.mp4?key=secret#fragment"
+    report = replace(
+        _report_for_path_privacy(tmp_path),
+        command=(
+            "marine-ptz-replay",
+            "--model",
+            model_url,
+            f"--source={source_url}",
+            "--report",
+            report_url,
+            f"--config={config_url}",
+            "--annotated-output",
+            annotated_url,
+        ),
+        options=options(
+            tmp_path,
+            source=Path("/home/alice/private/source.mp4"),
+            model=model_url,
+        ),
+    )
+
+    payload = report.to_dict()
+    _assert_replay_private_fragments_absent(
+        payload,
+        (
+            "model-user",
+            "model-pass",
+            "source-user",
+            "source-pass",
+            "output-user",
+            "output-pass",
+            "models.example",
+            "sources.example",
+            "outputs.example",
+            "configs.example",
+            "private",
+            "token",
+            "secret",
+            "fragment",
+            "%74oken",
+            "%73ecret",
+            "/home/alice",
+            "alice",
+        ),
+    )
+    serialized = json.dumps(payload, allow_nan=False, sort_keys=True)
+    assert "<remote-resource:custom.pt>" in serialized
+    assert "<local-path:source.mp4>" in serialized
+    assert "<local-path:frame.png>" in serialized
+    assert "<local-path:result.json>" in serialized
+    assert "<local-path:annotated.mp4>" in serialized
+    assert "<local-path:redacted>" in serialized
+
+
+@pytest.mark.parametrize(
+    "argument",
+    (
+        "path:https://example.com",
+        "path:file://",
+        "path:https://[",
+        "path:https://example.com/%3Ftoken%3Dsecret",
+        "path:https://example.com/%253Ftoken%253Dsecret",
+    ),
+)
+def test_replay_path_forced_malformed_or_encoded_urls_use_generic_marker(argument: str) -> None:
+    assert replay.sanitize_replay_command(("replay", "--model", argument)) == (
+        "replay",
+        "--model",
+        "<local-path:redacted>",
+    )
+
+
+def _report_for_path_privacy(tmp_path: Path) -> replay.ReplayReport:
+    return replay.ReplayReport(
+        timestamp_utc="2026-07-26T00:00:00+00:00",
+        command=(),
+        options=options(tmp_path),
+        source_type="video",
+        total_frames_available=1,
+        frame_dimensions=(100, 100),
+        resolved_device="cpu",
+        environment={},
+        processed_frames=1,
+        frames_with_detection=0,
+        frames_with_target=0,
+        first_target_frame=None,
+        acquisition_processing_s=None,
+        lost_target_episodes=(),
+        inference_ms=(1.0,),
+        horizontal_errors=(),
+        vertical_errors=(),
+        absolute_errors=(),
+        command_count=1,
+        processing_elapsed_s=1.0,
+        pan_saturation_count=0,
+        tilt_saturation_count=0,
+        final_pan_deg=90.0,
+        final_tilt_deg=90.0,
+        exit_reason="eof",
+        threshold_results=(),
+    )
+
+
+def _assert_replay_private_fragments_absent(
+    value: object,
+    fragments: tuple[str, ...],
+) -> None:
+    if isinstance(value, Mapping):
+        for nested in value.values():
+            _assert_replay_private_fragments_absent(nested, fragments)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            _assert_replay_private_fragments_absent(nested, fragments)
+        return
+    if isinstance(value, str):
+        for fragment in fragments:
+            assert fragment not in value
 
 
 def test_immutable_observer_events_contain_only_snapshots_and_cannot_mutate(
