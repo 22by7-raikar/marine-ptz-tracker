@@ -3,7 +3,7 @@
 ## Current repository checks
 
 - Run `python -m compileall -q src tests tools` to compile the package and checks.
-- Run `python -m pytest -m "not hardware and not gpu"` for the CI-equivalent suite: configuration, synthetic and OpenCV sources, YOLO conversion, device policy, target selection, tracking, simulated/serial actuation, protocol framing, firmware state policy, cleanup, CI structure, and benchmark logic. Tests require no hardware, serial device, model weights, display, network, or CUDA.
+- Run `python -m pytest -m "not hardware and not gpu"` for the CI-equivalent suite: configuration, synthetic and OpenCV sources, YOLO conversion, device policy, target selection, tracking, unified runtime composition, simulated/serial actuation, protocol framing, firmware state policy, cleanup, CI structure, and benchmark logic. Tests require no hardware, serial device, model weights, display, network, or CUDA.
 - Run `PYTHONPATH=src python -m marine_ptz.demo --config configs/development.yaml --steps 20 --no-sleep` for the deterministic vertical-slice demonstration.
 - The ordinary pytest run compiles the platform-neutral C++11 firmware core
   with `g++ -Wall -Wextra -Werror -pedantic` and compares it with the same
@@ -45,8 +45,47 @@ hash-locked cross-platform supply-chain lockfile.
 - acceptable tracking latency and target reacquisition behavior.
 
 Before camera bench testing, run the vision CLI against a local video with
-`--device cpu --max-frames N` and a local model path. Host CUDA validation is a
-separate manual test because the coding-agent sandbox may not expose the GPU.
+`--device cpu --max-frames N`, a local model path, and
+`--actuator-backend simulated`. Host CUDA validation is a separate manual test
+because the coding-agent sandbox may not expose the GPU.
+
+## Unified runtime checks
+
+Hardware-free integration tests inject source, detector, and actuator fakes
+through the production `run_vision()` composition. They cover detected and
+lost-target commands, the simulated default, hardware interlock rejection,
+explicit serial-port requirements, camera/model failures before enablement,
+startup ordering, handshake failure, detector and protocol faults after
+enablement, KeyboardInterrupt, finite EOF, frame validation, configured command
+rate, no commands after a fault, and ordered idempotent cleanup.
+
+Cancellation tests deterministically request termination during source/model
+startup, serial open, detector inference, selection/control, immediately
+before dispatch, and Arduino command-rate waiting. They prove that no new
+`ENABLE` or `SET` follows an observed request and that cleanup executes once.
+The signal-request object is tested as a state-only mechanism; it performs no
+serial or cleanup I/O.
+
+Runtime-level serial integration uses the production `ArduinoSerialActuator`,
+`InMemorySerialTransport`, and `FirmwareStateMachine` with fake frames and
+detector output. It covers startup `READY`/`HELLO`/`DISABLE`, `ENABLE`, real
+controller `SET`, shutdown disablement, lost ENABLE/SET acknowledgements,
+protocol faults, handshake failure, watchdog fallback, confirmed-coordinate
+conservatism, and cancellation during the actuator's real rate-limit wait.
+
+CLI tests cover configuration defaults, CLI precedence, repeatable target
+classes, explicit simulated override of hardware configuration, and rejection
+of unarmed Arduino selection. Import-isolation tests load the unified CLI in a
+clean subprocess and prove that NumPy, OpenCV, Torch, torchvision,
+Ultralytics, and pyserial remain unloaded. Existing rendering tests cover
+display `q`, annotation failure, writer construction/open/write failures, and
+resource release without opening a real display or file.
+
+These tests validate software ordering and failure policy only. Physical
+camera enumeration and EOF behavior for specific codecs, CUDA inference,
+serial device identity and permissions, Uno reset timing, firmware upload,
+servo direction/limits, watchdog timing, power integrity, and mechanical
+motion remain manual hardware checks.
 
 ## Serial and firmware checks
 
@@ -71,7 +110,8 @@ deadline boundary, partial-open cleanup, and sequence wrap.
 Run `python tools/serial_protocol_demo.py` for a fake-only handshake and command
 cycle. A future bench operator may explicitly provide `--port /dev/ttyACM0`
 after wiring review and installation of `.[hardware]`; that physical probe is
-outside ordinary CI.
+outside ordinary CI. The unified runtime adds independent
+`arduino_serial`/`--arm-hardware` gates and never enumerates a port.
 
 The compile-only baseline uses Arduino CLI `1.5.1`,
 `arduino:avr@1.8.8`, the official `Servo@1.3.0` library, and Uno FQBN

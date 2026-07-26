@@ -27,13 +27,14 @@ The initial runnable loop uses a metadata-only camera, repeatable moving boundin
 
 PyYAML is the sole runtime dependency. Configuration is converted immediately into frozen dataclasses, rejects unknown keys and non-finite numeric values, enforces backend-required device settings, and reports field-qualified validation errors. This prevents untyped configuration mappings from spreading into tracking code.
 
-## 2026-07-24: Keep real vision optional and simulated at the actuator boundary
+## 2026-07-24: Keep real vision optional and simulated at the actuator boundary (superseded)
 
 OpenCV capture and Ultralytics YOLO are optional implementations loaded lazily.
 The base and synthetic packages do not import NumPy, OpenCV, Torch, or
 Ultralytics. The real vision CLI may access a camera and GPU but always sends
 control output to `SimulatedPTZActuator`; serial and Arduino actuation remain
-out of scope.
+out of scope. The simulated-only composition choice was superseded on
+2026-07-26; optional dependency isolation remains current.
 
 The default model is lightweight `yolo11n.pt`. Classes are resolved from model
 metadata rather than fixed COCO IDs. The verified CUDA installation remains a
@@ -63,10 +64,35 @@ while direction/offset mapping produces bounded physical degrees. The firmware
 starts detached, attaches at neutral only after `ENABLE`, and detaches on
 `DISABLE` or watchdog expiry. This is a prototype communication safety policy,
 not an emergency-stop certification. Existing synthetic and vision composition
-continues to use simulated actuation.
+continued to use simulated actuation until the explicitly armed runtime
+composition on 2026-07-26.
 
 Opening an Uno serial device may cause its normal auto-reset. The host uses a
 bounded boot grace, total handshake deadline, repeated identical `HELLO`, and a
 correlated `DISABLE`; it does not suppress or manually pulse DTR/RTS. Firmware
 services its watchdog before and after bounded serial work and emits pending
 CRLF responses incrementally according to available TX capacity.
+
+## 2026-07-26: Use one fail-closed real-vision composition root
+
+`marine_ptz.vision_cli` remains the sole OpenCV/Ultralytics tracking loop and
+now selects either simulated or Arduino serial actuation through one factory.
+The existing selector, controller, actuator, source, and detector
+implementations are reused; no parallel hardware pipeline is introduced.
+
+Simulation remains the development default. Physical motion requires a
+validated configuration whose actuator backend is `arduino_serial`, explicit
+`--arm-hardware`, and a serial device supplied by CLI or validated
+configuration. Serial ports are never discovered automatically. Source, model,
+selector, and controller initialization precede the serial
+`HELLO`/`READY`/`DISABLE` handshake, and `ENABLE` is the final startup action.
+
+The loop enforces the configured tracking update rate and uses one idempotent
+cleanup coordinator. It requests bounded disablement before closing the
+actuator and video resources. Signal handlers only set a local termination
+request. The runtime and production serial actuator share that request at
+motion safety boundaries, including the serial rate-limit wait, so an observed
+cancellation starts no new `ENABLE` or `SET`; an already submitted write may
+still complete. Primary runtime and cleanup failures are both reported. These
+interlocks reduce accidental motion; they do not create a safety-rated
+emergency-stop system or replace pending physical validation.

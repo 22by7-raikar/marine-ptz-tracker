@@ -4,6 +4,7 @@ from dataclasses import replace
 
 import pytest
 
+from marine_ptz.cancellation import OperationCancelled
 from marine_ptz.config import AppConfig, load_config
 from marine_ptz.firmware_model import FirmwareSafetyConfig, FirmwareStateMachine
 from marine_ptz.interfaces import Actuator
@@ -526,6 +527,56 @@ def test_command_rate_uses_one_bounded_sleep_without_busy_loop() -> None:
     actuator.apply(PTZCommand(101.0, 81.0, sequence=2))
 
     assert sleeps == [pytest.approx(0.1)]
+
+
+def test_cancellation_during_command_rate_wait_prevents_set_write() -> None:
+    config = load_config("configs/hardware.yaml")
+    now = [10.0]
+    cancelled = [False]
+
+    def sleep(duration: float) -> None:
+        now[0] += duration
+        cancelled[0] = True
+
+    transport = InMemorySerialTransport(_firmware(config).handle_frame)
+    actuator = _actuator(
+        config,
+        transport,
+        monotonic=lambda: now[0],
+        sleep=sleep,
+        cancellation_requested=lambda: cancelled[0],
+    )
+    actuator.open()
+    actuator.enable()
+    actuator.apply(PTZCommand(100.0, 80.0, sequence=1))
+    writes_before_cancelled_apply = list(transport.writes)
+
+    with pytest.raises(OperationCancelled, match="cancelled"):
+        actuator.apply(PTZCommand(101.0, 81.0, sequence=2))
+
+    assert transport.writes == writes_before_cancelled_apply
+    assert (actuator.pan_deg, actuator.tilt_deg) == (100.0, 80.0)
+    assert actuator.enabled is True
+
+
+def test_cancellation_before_enable_prevents_enable_write() -> None:
+    config = load_config("configs/hardware.yaml")
+    cancelled = [False]
+    transport = InMemorySerialTransport(_firmware(config).handle_frame)
+    actuator = _actuator(
+        config,
+        transport,
+        cancellation_requested=lambda: cancelled[0],
+    )
+    actuator.open()
+    writes_before_enable = list(transport.writes)
+    cancelled[0] = True
+
+    with pytest.raises(OperationCancelled, match="cancelled"):
+        actuator.enable()
+
+    assert transport.writes == writes_before_enable
+    assert actuator.enabled is False
 
 
 def test_enable_requires_exact_neutral_acknowledgement() -> None:
