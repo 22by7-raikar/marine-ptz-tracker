@@ -40,10 +40,19 @@ comparing runs. Blank-frame results are suitable for model-inference baselines,
 not scene realism. Local image decoding is performed before timing and is not a
 camera benchmark. JSON reports default to ignored `artifacts/benchmarks/` and
 record structured configuration, the resolved device, allowlisted versions and
-GPU metadata, and a sanitized invocation. Report serialization rejects
-non-finite or unsupported JSON values. A complete same-directory temporary file
-is flushed and synchronized before it atomically replaces the destination, so a
-failed write does not overwrite a prior report.
+GPU metadata, and a sanitized invocation. The field type takes precedence over
+the value syntax: path-typed `--image`, `--output`, `--report`, and `--config`
+values always become basename-only `<local-path:basename>` markers, even when
+they look like URLs. Model fields preserve safe named identifiers such as
+`yolo11n.pt`, use `<local-path:basename>` for filesystem paths, and use
+`<remote-resource:basename>` for remote URLs. Marker derivation discards URL
+authority, credentials, query, and fragment. Empty, malformed, or encoded
+ambiguous basenames use the matching `...:redacted` marker. Credentials and
+sensitive argument values are replaced with `<redacted>`. Reports are designed
+to be shareable, but must still be reviewed before publication. Report serialization
+rejects non-finite or unsupported JSON values. A complete same-directory
+temporary file is flushed and synchronized before it atomically replaces the
+destination, so a failed write does not overwrite a prior report.
 
 ## Preliminary host result — July 24, 2026
 

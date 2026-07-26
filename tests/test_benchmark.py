@@ -420,7 +420,33 @@ def test_replace_failure_preserves_existing_report_and_cleans_temporary(
         ),
         (
             ("benchmark", "--model", "/models/local.pt", "--device=cpu"),
-            ("benchmark", "--model", "/models/local.pt", "--device=cpu"),
+            ("benchmark", "--model", "<local-path:local.pt>", "--device=cpu"),
+        ),
+        (
+            (
+                "benchmark",
+                "--model=relative/models/local.pt",
+                "--image",
+                "../private/frames/frame.png",
+                "--output=artifacts/private/report.json",
+                "--report",
+                "path:/tmp/private/report.json",
+                "--config=file:///home/alice/private/config.yaml",
+            ),
+            (
+                "benchmark",
+                "--model=<local-path:local.pt>",
+                "--image",
+                "<local-path:frame.png>",
+                "--output=<local-path:report.json>",
+                "--report",
+                "<local-path:report.json>",
+                "--config=<local-path:config.yaml>",
+            ),
+        ),
+        (
+            ("benchmark", "--model", "yolo11n.pt"),
+            ("benchmark", "--model", "yolo11n.pt"),
         ),
     ],
 )
@@ -431,17 +457,251 @@ def test_command_sanitization(
     assert sanitize_command(command) == expected
 
 
-def test_structured_model_configuration_is_sanitized() -> None:
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    (
+        ("yolo11n.pt", "yolo11n.pt"),
+        ("/home/alice/models/custom.pt", "<local-path:custom.pt>"),
+        (
+            "https://user:password@models.example/private/custom.pt?token=secret#fragment",
+            "<remote-resource:custom.pt>",
+        ),
+        ("https://models.example", "<remote-resource:redacted>"),
+        (
+            "https://models.example/private/%253Ftoken%253Dsecret",
+            "<remote-resource:redacted>",
+        ),
+    ),
+)
+def test_structured_model_configuration_uses_model_field_policy(
+    model: str,
+    expected: str,
+) -> None:
     report = replace(
         _completed_report(),
+        config=BenchmarkConfig(model=model),
+    )
+
+    assert report.to_dict()["configuration"]["model"] == expected
+
+
+def test_path_typed_benchmark_urls_are_marked_by_field_type() -> None:
+    image_url = "https://user:password@images.example/private/frame.png?token=secret#fragment"
+    output_url = "https://writer:pass@reports.example/private/result.json?key=secret#fragment"
+    report_url = "file:///home/alice/private/replay.json?token=secret#fragment"
+    config_url = "https://configs.example"
+
+    assert sanitize_command(
+        (
+            "benchmark",
+            "--image",
+            image_url,
+            f"--output={output_url}",
+            "--report",
+            report_url,
+            f"--config={config_url}",
+        )
+    ) == (
+        "benchmark",
+        "--image",
+        "<local-path:frame.png>",
+        "--output=<local-path:result.json>",
+        "--report",
+        "<local-path:replay.json>",
+        "--config=<local-path:redacted>",
+    )
+
+
+def test_benchmark_report_redacts_all_local_path_structure(tmp_path: Path) -> None:
+    report = replace(
+        _completed_report(),
+        command=(
+            "marine-ptz-benchmark",
+            "--model",
+            "/home/alice/private/models/yolo11n.pt",
+            "--image=relative/private/frames/frame.png",
+            "--output",
+            "/tmp/private-output/report.json",
+            "--report=path:/tmp/private-output/replay.json",
+            "--config",
+            "file:///home/alice/private/config.yaml",
+            "path:/home/alice/private/positional.png",
+            "https://user:password@example.com/model.pt?token=secret",
+            "--api-key",
+            "secret-value",
+        ),
         config=BenchmarkConfig(
-            model="https://user:password@example.com/model.pt?token=secret"
+            model="relative/private/models/yolo11n.pt",
+            image_path=Path("../private/frames/frame.png"),
         ),
     )
 
-    assert report.to_dict()["configuration"]["model"] == (
-        "https://<redacted>@example.com/model.pt?token=%3Credacted%3E"
+    output_path = tmp_path / "shareable.json"
+    write_report(report, output_path)
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    private_fragments = (
+        "/home/alice/private",
+        "/tmp/private-output",
+        "relative/private",
+        "../private",
+        "alice",
+        "secret-value",
     )
+    _assert_private_fragments_absent(payload, private_fragments)
+    serialized = json.dumps(payload, allow_nan=False, sort_keys=True)
+    assert "<local-path:yolo11n.pt>" in serialized
+    assert "<local-path:frame.png>" in serialized
+    assert "<local-path:report.json>" in serialized
+    assert "<local-path:config.yaml>" in serialized
+    assert "<redacted>@example.com" in serialized
+    assert "token=%3Credacted%3E" in serialized
+    assert "<redacted>" in serialized
+
+
+def test_benchmark_report_preserves_named_model_identifier() -> None:
+    report = replace(_completed_report(), config=BenchmarkConfig(model="yolo11n.pt"))
+
+    assert report.to_dict()["configuration"]["model"] == "yolo11n.pt"
+
+
+def test_path_forced_url_values_keep_only_the_safe_url_path_basename(
+    tmp_path: Path,
+) -> None:
+    remote_model = "path:https://user:pass@example.com/private/model.pt?token=secret#fragment"
+    file_image = "path:file:///home/alice/private/frame.png?token=secret#fragment"
+    report_path = "path:https://report-user:report-pass@reports.example/private/report.json?key=secret#fragment"
+    report = replace(
+        _completed_report(),
+        command=(
+            "marine-ptz-benchmark",
+            "--model",
+            remote_model,
+            f"--image={file_image}",
+            "--output",
+            report_path,
+        ),
+        config=BenchmarkConfig(
+            model=remote_model,
+            image_path=Path("/home/alice/private/frame.png"),
+        ),
+    )
+
+    output_path = tmp_path / "shareable.json"
+    write_report(report, output_path)
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    _assert_private_fragments_absent(
+        payload,
+        (
+            "user",
+            "pass",
+            "token",
+            "secret",
+            "fragment",
+            "example.com",
+            "reports.example",
+            "private",
+            "/home/alice",
+            "alice",
+        ),
+    )
+    serialized = json.dumps(payload, allow_nan=False, sort_keys=True)
+    assert "<local-path:model.pt>" in serialized
+    assert "<local-path:frame.png>" in serialized
+    assert "<local-path:report.json>" in serialized
+
+
+def test_benchmark_report_path_typed_urls_never_retain_url_structure(
+    tmp_path: Path,
+) -> None:
+    model_url = "https://model-user:model-pass@models.example/private/custom.pt?token=secret#fragment"
+    image_url = "https://image-user:image-pass@images.example/private/frame.png?token=secret#fragment"
+    output_url = "https://output-user:output-pass@outputs.example/private/result.json?key=secret#fragment"
+    report_url = "file:///home/alice/private/replay.json?%74oken=%73ecret#fragment"
+    config_url = "https://configs.example"
+    report = replace(
+        _completed_report(),
+        command=(
+            "marine-ptz-benchmark",
+            "--model",
+            model_url,
+            "--image",
+            image_url,
+            f"--output={output_url}",
+            "--report",
+            report_url,
+            f"--config={config_url}",
+        ),
+        config=BenchmarkConfig(
+            model=model_url,
+            image_path=Path("/home/alice/private/frame.png"),
+        ),
+    )
+
+    output_path = tmp_path / "shareable.json"
+    write_report(report, output_path)
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    _assert_private_fragments_absent(
+        payload,
+        (
+            "model-user",
+            "model-pass",
+            "image-user",
+            "image-pass",
+            "output-user",
+            "output-pass",
+            "models.example",
+            "images.example",
+            "outputs.example",
+            "configs.example",
+            "private",
+            "token",
+            "secret",
+            "fragment",
+            "%74oken",
+            "%73ecret",
+            "/home/alice",
+            "alice",
+        ),
+    )
+    serialized = json.dumps(payload, allow_nan=False, sort_keys=True)
+    assert "<remote-resource:custom.pt>" in serialized
+    assert "<local-path:frame.png>" in serialized
+    assert "<local-path:result.json>" in serialized
+    assert "<local-path:replay.json>" in serialized
+    assert "<local-path:redacted>" in serialized
+
+
+@pytest.mark.parametrize(
+    "argument",
+    (
+        "path:https://example.com",
+        "path:file://",
+        "path:https://[",
+        "path:https://example.com/%3Ftoken%3Dsecret",
+        "path:https://example.com/%253Ftoken%253Dsecret",
+    ),
+)
+def test_path_forced_malformed_or_encoded_url_values_use_generic_marker(argument: str) -> None:
+    assert sanitize_command(("benchmark", "--model", argument)) == (
+        "benchmark",
+        "--model",
+        "<local-path:redacted>",
+    )
+
+
+def _assert_private_fragments_absent(value: object, fragments: tuple[str, ...]) -> None:
+    if isinstance(value, Mapping):
+        for nested in value.values():
+            _assert_private_fragments_absent(nested, fragments)
+        return
+    if isinstance(value, list):
+        for nested in value:
+            _assert_private_fragments_absent(nested, fragments)
+        return
+    if isinstance(value, str):
+        for fragment in fragments:
+            assert fragment not in value
 
 
 @pytest.mark.parametrize(

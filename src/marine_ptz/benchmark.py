@@ -44,6 +44,8 @@ _SENSITIVE_ARGUMENT_NAMES = frozenset(
     }
 )
 _REDACTED = "<redacted>"
+_PATH_ARGUMENT_NAMES = frozenset({"--config", "--image", "--output", "--report"})
+_MODEL_ARGUMENT = "--model"
 
 
 class BenchmarkError(ValueError):
@@ -146,7 +148,7 @@ class BenchmarkReport:
                 "arguments": list(sanitized_command[1:]),
             },
             "configuration": {
-                "model": _sanitize_url(self.config.model),
+                "model": _sanitize_model_value(self.config.model),
                 "requested_device": self.config.device,
                 "resolved_device": self.resolved_device,
                 "image_size": self.config.image_size,
@@ -154,7 +156,11 @@ class BenchmarkReport:
                 "iou_threshold": self.config.iou_threshold,
                 "warmup_iterations": self.config.warmup_iterations,
                 "measured_iterations": self.config.measured_iterations,
-                "image_path": None if self.config.image_path is None else str(self.config.image_path),
+                "image_path": (
+                    None
+                    if self.config.image_path is None
+                    else local_path_marker(str(self.config.image_path))
+                ),
             },
             "input_resolution": {
                 "width": self.input_resolution[0],
@@ -346,33 +352,129 @@ def write_report(report: JsonReport, path: Path) -> None:
 
 
 def sanitize_command(command: Sequence[str]) -> tuple[str, ...]:
-    """Return a shareable invocation with sensitive argument values redacted."""
+    """Return a shareable invocation without secrets or local path structure."""
     sanitized: list[str] = []
-    redact_next = False
+    value_kind_next: str | None = None
     for raw_argument in command:
         argument = str(raw_argument)
-        if redact_next:
-            sanitized.append(_REDACTED)
-            redact_next = False
+        if value_kind_next is not None:
+            sanitized.append(_sanitize_argument_value(argument, value_kind_next))
+            value_kind_next = None
             continue
 
-        sanitized_url = _sanitize_url(argument)
-        if sanitized_url != argument:
-            sanitized.append(sanitized_url)
+        if not argument.startswith("-"):
+            sanitized.append(_sanitize_generic_value(argument))
             continue
 
         if "=" in argument:
             name, value = argument.split("=", 1)
             if _is_sensitive_name(name):
                 sanitized.append(f"{name}={_REDACTED}")
+            elif name == _MODEL_ARGUMENT:
+                sanitized.append(f"{name}={_sanitize_model_value(value)}")
+            elif name in _PATH_ARGUMENT_NAMES:
+                sanitized.append(f"{name}={_sanitize_path_argument_value(value)}")
             else:
-                sanitized.append(f"{name}={_sanitize_url(value)}")
+                sanitized.append(f"{name}={_sanitize_generic_value(value)}")
             continue
 
-        sanitized.append(_sanitize_url(argument))
         if _is_sensitive_name(argument):
-            redact_next = True
+            sanitized.append(argument)
+            value_kind_next = "secret"
+        elif argument == _MODEL_ARGUMENT:
+            sanitized.append(argument)
+            value_kind_next = "model"
+        elif argument in _PATH_ARGUMENT_NAMES:
+            sanitized.append(argument)
+            value_kind_next = "path"
+        else:
+            sanitized.append(_sanitize_generic_value(argument))
     return tuple(sanitized)
+
+
+def _sanitize_argument_value(value: str, kind: str) -> str:
+    if kind == "secret":
+        return _REDACTED
+    if kind == "model":
+        return _sanitize_model_value(value)
+    return _sanitize_path_argument_value(value)
+
+
+def _sanitize_model_value(value: str) -> str:
+    """Preserve named models while redacting local paths and remote resources."""
+    if _looks_local_path(value):
+        return local_path_marker(value)
+    if _looks_url(value) or _looks_malformed_url(value):
+        return remote_resource_marker(value)
+    return value
+
+
+def _sanitize_path_argument_value(value: str) -> str:
+    """Replace every path-typed CLI value, regardless of its syntax."""
+    return local_path_marker(value)
+
+
+def _sanitize_generic_value(value: str) -> str:
+    if _looks_local_path(value):
+        return local_path_marker(value)
+    return _sanitize_url(value)
+
+
+def local_path_marker(value: str) -> str:
+    """Return a basename-only marker without retaining local or URL structure."""
+    return _resource_marker(value, "local-path", allow_file_url=True)
+
+
+def remote_resource_marker(value: str) -> str:
+    """Return a marker for a remote model resource without retaining its URL."""
+    return _resource_marker(value, "remote-resource", allow_file_url=False)
+
+
+def _resource_marker(value: str, marker_kind: str, *, allow_file_url: bool) -> str:
+    fallback = f"<{marker_kind}:redacted>"
+    path_value = value[5:] if value.startswith("path:") else value
+    if _looks_url(path_value):
+        try:
+            parsed = urlsplit(path_value)
+        except ValueError:
+            return fallback
+        if not parsed.path or (parsed.scheme.casefold() != "file" and not parsed.netloc):
+            return fallback
+        if parsed.scheme.casefold() == "file" and not allow_file_url:
+            return fallback
+        path_value = parsed.path
+    elif _looks_malformed_url(path_value):
+        return fallback
+
+    name = path_value.rstrip("/\\").replace("\\", "/").rsplit("/", 1)[-1]
+    if not name or _encoded_name_is_unsafe(name):
+        return fallback
+    return f"<{marker_kind}:{name}>"
+
+
+def _looks_malformed_url(value: str) -> bool:
+    return value.casefold().startswith(("http:", "https:", "file:"))
+
+
+def _looks_url(value: str) -> bool:
+    return "://" in value
+
+
+def _encoded_name_is_unsafe(name: str) -> bool:
+    return "%" in name or any(character in name for character in "/\\?#@:")
+
+
+def _looks_local_path(value: str) -> bool:
+    if value.startswith(("path:", "file://")):
+        return True
+    if "://" in value:
+        return False
+    return (
+        value.startswith(("/", "./", "../", "~/", "\\", ".\\", "..\\", "~\\"))
+        or "/" in value
+        or "\\" in value
+        or (len(value) >= 3 and value[0].isalpha() and value[1:3] in {":/", ":\\"})
+    )
 
 
 def format_report(report: BenchmarkReport) -> str:
