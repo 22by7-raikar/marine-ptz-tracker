@@ -8,19 +8,21 @@ The laptop owns capture, detection, target selection, control, telemetry, and se
 
 ## Status
 
-The hardware-independent synthetic slice and a real OpenCV + Ultralytics vision
-pipeline are implemented. The vision pipeline reads a camera or media file,
-detects configured marine classes, selects a target, and drives only the
-    simulated PTZ actuator. A bounded Arduino protocol, lazy host serial actuator,
-    in-memory firmware model, and Uno firmware foundation are implemented and
-    compile successfully for an Arduino Uno. They have not been uploaded or
-    bench-verified. The synthetic and vision
-tracking demos never select physical actuation; only the serial protocol tool
-can do so when an operator explicitly supplies `--port`.
+The hardware-independent synthetic slice and the unified OpenCV + Ultralytics
+runtime are implemented. The runtime reads a camera or finite media source,
+detects configured marine classes, selects a target, applies the existing
+bounded controller, and drives either the simulated actuator or the
+explicitly armed Arduino serial actuator.
+
+The bounded Arduino protocol, lazy host serial actuator, in-memory firmware
+model, and Uno firmware compile successfully. They have not been uploaded or
+bench-verified. Physical actuation is fail-closed: it requires the hardware
+configuration, explicit `--arm-hardware`, and an explicit serial path from the
+CLI or validated configuration. The runtime never discovers a serial port.
 
 ## Layout
 
-- `src/marine_ptz`: typed configuration, domain values, interfaces, synthetic and OpenCV sources, YOLO detection, tracking policy, simulated actuation, and CLI composition.
+- `src/marine_ptz`: typed configuration, domain values, interfaces, synthetic and OpenCV sources, YOLO detection, tracking policy, simulated/serial actuation, and the unified CLI composition.
 - `configs`: development defaults and hardware deployment values.
 - `firmware/ptz_controller`: Arduino firmware contract and implementation area.
 - `docs`: architecture, wiring, bill of materials, tests, and decisions.
@@ -124,32 +126,114 @@ Ultralytics is offered under AGPL-3.0 and Enterprise licensing. Review the
 applicable Ultralytics license before distributing or commercially deploying a
 system that uses it.
 
-## Real vision pipeline
+## End-to-end runtime
 
-The exact validated host command for camera index 0 with CUDA inference is:
+The default configuration and programmatic `VisionOptions` select simulated
+actuation. Use a local model path in network-free operation; a missing named
+Ultralytics model may otherwise cause Ultralytics to attempt a download.
+
+Offline video with simulated actuation:
+
+```bash
+conda run -n marine_ptz python -m marine_ptz.vision_cli \
+  --config configs/development.yaml \
+  --source path:/path/to/input.mp4 \
+  --model /path/to/local-yolo11n.pt \
+  --device cpu \
+  --target-class boat \
+  --max-frames 300
+```
+
+Live camera with simulated actuation:
 
 ```bash
 conda run -n marine_ptz python -m marine_ptz.vision_cli \
   --config configs/hardware.yaml \
   --source camera:0 \
-  --model yolo11n.pt \
+  --model /path/to/local-yolo11n.pt \
   --device cuda:0 \
   --target-class boat \
   --confidence 0.60 \
   --iou 0.45 \
   --image-size 640 \
+  --actuator-backend simulated \
   --display
 ```
+
+Live camera with armed Arduino actuation is intentionally verbose:
+
+```bash
+conda run -n marine_ptz python -m marine_ptz.vision_cli \
+  --config configs/hardware.yaml \
+  --source camera:0 \
+  --model /path/to/local-yolo11n.pt \
+  --device cuda:0 \
+  --target-class boat \
+  --actuator-backend arduino_serial \
+  --serial-port /dev/ttyACM0 \
+  --arm-hardware \
+  --display
+```
+
+Do not run the armed form until camera identity, serial-device identity,
+logical/physical limits, servo directions, neutral angles, external servo
+power, and common ground have been bench-verified. Omitting
+`--actuator-backend` uses the validated configuration: development selects
+simulation, while the hardware configuration selects `arduino_serial` and
+therefore still refuses to start without `--arm-hardware`.
 
 `--source 0` is also camera index 0. Use `--source path:0` for a file literally
 named `0`; other media paths can be passed directly. Target classes may be
 repeated or comma-separated. Use `--output annotated.mp4` for annotated video
 and `--max-frames N` for a finite run. Press `q` to leave display mode.
 
-`yolo11n.pt` is the lightweight default. Ultralytics may download named
-pretrained weights when they are not already cached; pass a local model path
-when network-free startup is required. Model weights and generated recordings
-are ignored by Git.
+Startup initializes capture, model, selection, and control before opening the
+serial transport. `ArduinoSerialActuator.open()` completes correlated
+`HELLO`/`READY`/`DISABLE` while firmware remains disabled; only then can the
+explicitly armed runtime call `ENABLE`. Shutdown first attempts bounded
+`DISABLE`, closes the actuator transport, and then releases video resources.
+Finite-media EOF and `--max-frames` are successful exits. Detector, frame,
+camera, actuator, or protocol failures stop the loop, run bounded cleanup, and
+produce a nonzero CLI status.
+
+### Process exit status
+
+| Runtime outcome | CLI status |
+| --- | ---: |
+| Finite-media EOF, `q`, `--max-frames`, or another normal programmatic completion | 0 |
+| SIGINT-requested shutdown | 130 |
+| SIGTERM-requested shutdown | 143 |
+| Unexpected `OperationCancelled` without a recorded runtime termination request | 2 |
+| Detector, source, protocol, actuator, configuration, or cleanup failure | 2 |
+
+Signal-requested shutdown is operationally expected: the runtime records the
+request, completes bounded cleanup, and stops issuing new motion commands.
+The nonzero 130/143 statuses follow normal Unix signal conventions rather than
+indicating that cleanup was skipped or that an operator cancellation was a
+runtime defect. `run_vision()` returns a processed-frame count for library
+callers; `main()` alone maps runtime outcomes to process statuses.
+
+`yolo11n.pt` remains the lightweight configured default. Model weights,
+recordings, and annotated outputs are ignored by Git.
+
+## Safety limitations
+
+The arming flag, bounded host exchanges, firmware limits, and watchdog reduce
+risk; they do not make this an emergency-stop or safety-rated motion system.
+The runtime checks its shared termination request after source and model
+startup, before/after serial handshake, immediately before `ENABLE`, and at
+each tracking dispatch boundary. The serial actuator checks the same request
+before and after its bounded command-rate sleep and immediately before a
+motion write. Once cancellation is observed at one of those boundaries, no new
+`ENABLE` or `SET` is initiated; cleanup still attempts bounded `DISABLE`.
+An operation already handed to the serial/OS layer may still complete.
+USB disconnects, process termination, or serial faults can leave the last
+confirmed physical position uncertain until the firmware watchdog detaches
+the servos. Cleanup attempts `DISABLE`, but software cannot guarantee delivery
+after a transport or power failure. Keep a direct way to remove external servo
+power during all bench work. Camera, serial, mechanics, power, thermal
+behavior, watchdog timing, and full-system tracking remain pending physical
+validation.
 
 ## Benchmarking
 
@@ -216,8 +300,9 @@ python tools/serial_protocol_demo.py --port /dev/ttyACM0
 ```
 
 Do not run the physical form until wiring, limits, directions, neutral angles,
-servo current, and device identity have been verified. The serial actuator is
-not yet composed into `marine_ptz.demo` or `marine_ptz.vision_cli`.
+servo current, and device identity have been verified. The protocol tool
+remains useful for isolated bench diagnosis; the end-to-end runtime composes
+the same serial actuator only behind its additional hardware-arming gates.
 
 Opening an Uno serial port may reset the board. The host deliberately allows a
 bounded 2-second boot grace and requires a sequence-correlated `READY` plus
@@ -245,9 +330,10 @@ before actuation can resume.
 `configs/development.yaml` selects the synthetic camera and simulated actuator.
 `configs/hardware.yaml` records the OpenCV/Ultralytics vision defaults and
 candidate Arduino serial, mapping, physical-limit, neutral, and watchdog
-settings, plus the boot grace and total handshake deadline. The vision CLI
-always uses simulated actuation and does not open a serial device.
-Configuration loading and serial-actuator construction alone never start
-hardware.
+settings, plus the boot grace and total handshake deadline. Configuration
+loading and serial-actuator construction alone never start hardware. The
+vision CLI opens serial only when the resolved backend is `arduino_serial`,
+and calls `ENABLE` only after `--arm-hardware` and successful dependency and
+handshake initialization.
 
 See [architecture](docs/architecture.md), [wiring](docs/wiring.md), and the [test plan](docs/test_plan.md) before connecting equipment.

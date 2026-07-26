@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
+import signal
 from typing import Any
 
 import pytest
 
 import marine_ptz.vision_cli as vision_cli
+from marine_ptz.cancellation import OperationCancelled
 from marine_ptz.config import load_config
 from marine_ptz.types import Detection, Frame
 from marine_ptz.vision_cli import VisionOptions, _target_classes, run_vision
@@ -336,7 +339,7 @@ def test_cli_values_override_configuration_and_defaults_fill_missing_values(
     monkeypatch.setattr(
         vision_cli,
         "run_vision",
-        lambda config, selected: captured.append(selected) or 0,
+        lambda config, selected, **kwargs: captured.append(selected) or 0,
     )
 
     result = vision_cli.main(
@@ -386,7 +389,7 @@ def test_cli_uses_config_detection_defaults(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         vision_cli,
         "run_vision",
-        lambda config, selected: captured.append(selected) or 0,
+        lambda config, selected, **kwargs: captured.append(selected) or 0,
     )
 
     assert (
@@ -404,6 +407,66 @@ def test_cli_uses_config_detection_defaults(monkeypatch: pytest.MonkeyPatch) -> 
     assert selected.confidence_threshold == 0.6
     assert selected.iou_threshold == 0.45
     assert selected.image_size == 640
+
+
+@pytest.mark.parametrize(
+    ("completion", "description"),
+    [(0, "EOF"), (1, "q"), (5, "max frames")],
+)
+def test_main_returns_zero_for_normal_runtime_completion(
+    monkeypatch: pytest.MonkeyPatch,
+    completion: int,
+    description: str,
+) -> None:
+    """The library count is not a process exit status for normal completion."""
+    monkeypatch.setattr(
+        vision_cli,
+        "run_vision",
+        lambda _config, _options, **_kwargs: completion,
+    )
+
+    assert vision_cli.main(
+        ["--config", "configs/development.yaml", "--source", "path:fixture.mp4"]
+    ) == 0, description
+
+
+@pytest.mark.parametrize(
+    ("signal_number", "expected"),
+    [(signal.SIGINT, 130), (signal.SIGTERM, 143)],
+)
+def test_main_returns_conventional_signal_status(
+    monkeypatch: pytest.MonkeyPatch,
+    signal_number: int,
+    expected: int,
+) -> None:
+    request = vision_cli._TerminationRequest()
+    request.request(signal_number)
+
+    @contextmanager
+    def termination_context() -> Any:
+        yield request
+
+    monkeypatch.setattr(vision_cli, "_termination_signals", termination_context)
+    monkeypatch.setattr(vision_cli, "run_vision", lambda *_args, **_kwargs: 0)
+
+    assert vision_cli.main(
+        ["--config", "configs/development.yaml", "--source", "path:fixture.mp4"]
+    ) == expected
+
+
+def test_main_returns_failure_for_unexpected_component_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def cancel(*_args: object, **_kwargs: object) -> int:
+        raise OperationCancelled("detector cancelled")
+
+    monkeypatch.setattr(vision_cli, "run_vision", cancel)
+
+    assert vision_cli.main(
+        ["--config", "configs/development.yaml", "--source", "path:fixture.mp4"]
+    ) == 2
+    assert "detector cancelled" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("max_frames", [0, -1])
@@ -425,7 +488,7 @@ def test_max_frames_validation_prevents_resource_construction(max_frames: int) -
     assert constructed is False
 
 
-def test_hardware_config_still_constructs_only_simulated_actuator(
+def test_explicit_simulated_options_override_hardware_configuration(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     constructed: list[object] = []
@@ -448,3 +511,103 @@ def test_hardware_config_still_constructs_only_simulated_actuator(
     )
 
     assert len(constructed) == 1
+
+
+def test_cli_hardware_configuration_requires_explicit_arming(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = vision_cli.main(
+        [
+            "--config",
+            "configs/hardware.yaml",
+            "--source",
+            "path:video.mp4",
+            "--device",
+            "cpu",
+        ]
+    )
+
+    assert result == 2
+    assert "--arm-hardware" in capsys.readouterr().err
+
+
+def test_cli_simulated_override_avoids_hardware_arming(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[VisionOptions] = []
+    monkeypatch.setattr(
+        vision_cli,
+        "run_vision",
+        lambda config, selected, **kwargs: captured.append(selected) or 0,
+    )
+
+    result = vision_cli.main(
+        [
+            "--config",
+            "configs/hardware.yaml",
+            "--source",
+            "path:video.mp4",
+            "--actuator-backend",
+            "simulated",
+        ]
+    )
+
+    assert result == 0
+    assert captured[0].actuator_backend == "simulated"
+    assert captured[0].arm_hardware is False
+    assert captured[0].serial_port is None
+
+
+def test_cli_values_override_hardware_backend_and_serial_port(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[VisionOptions] = []
+    monkeypatch.setattr(
+        vision_cli,
+        "run_vision",
+        lambda config, selected, **kwargs: captured.append(selected) or 0,
+    )
+
+    result = vision_cli.main(
+        [
+            "--config",
+            "configs/hardware.yaml",
+            "--source",
+            "camera:1",
+            "--actuator-backend",
+            "arduino_serial",
+            "--serial-port",
+            "/dev/explicit-test-port",
+            "--arm-hardware",
+        ]
+    )
+
+    assert result == 0
+    assert captured[0].source == 1
+    assert captured[0].actuator_backend == "arduino_serial"
+    assert captured[0].serial_port == "/dev/explicit-test-port"
+    assert captured[0].arm_hardware is True
+
+
+def test_cli_uses_validated_camera_and_serial_paths_when_not_overridden(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[VisionOptions] = []
+    monkeypatch.setattr(
+        vision_cli,
+        "run_vision",
+        lambda config, selected, **kwargs: captured.append(selected) or 0,
+    )
+
+    result = vision_cli.main(
+        [
+            "--config",
+            "configs/hardware.yaml",
+            "--arm-hardware",
+        ]
+    )
+
+    assert result == 0
+    assert captured[0].source == 0
+    assert captured[0].actuator_backend == "arduino_serial"
+    assert captured[0].serial_port is None

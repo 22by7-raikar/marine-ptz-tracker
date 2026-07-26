@@ -34,6 +34,7 @@ import sys
 optional = {optional_names}
 import marine_ptz
 import marine_ptz.benchmark
+import marine_ptz.vision_cli
 assert not (set(optional) & set(sys.modules)), sorted(set(optional) & set(sys.modules))
 from marine_ptz.demo import main
 assert main([

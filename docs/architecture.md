@@ -5,8 +5,8 @@
 ```text
 CameraSource -> Detector -> TargetSelector -> PTZController -> Actuator
      |                                                        |
-synthetic/OpenCV                                  simulated now
-Synthetic/YOLO detector                           Arduino serial foundation
+synthetic/OpenCV                                  simulated (safe default)
+Synthetic/YOLO detector                           explicitly armed Arduino serial
 ```
 
 The Ubuntu laptop owns all image processing, target policy, control calculations, telemetry, and serial transport. The Arduino Uno is a narrow safety boundary: it receives validated pan/tilt commands, applies local limits, and drives two SG90 servos.
@@ -17,10 +17,11 @@ while OpenCV frames carry NumPy arrays without importing NumPy in the base
 package. Image payloads are excluded from frame equality, hashing, and repr;
 the capture metadata defines frame value equality. `interfaces.py` contains
 dependency-inversion boundaries. Synthetic components are composed by
-`demo.py`; OpenCV capture, Ultralytics detection, marine selection, control,
-and simulated actuation are composed by `vision_cli.py`. The host serial
-actuator is intentionally not composed into either existing pipeline yet; it
-is exercised only through an injected transport or the explicit serial tool.
+`demo.py`. `vision_cli.py` is the single real-vision composition root for
+OpenCV capture, Ultralytics detection, marine selection, the existing
+controller, telemetry, and either simulated or explicitly armed serial
+actuation. Backend construction is centralized rather than spread through the
+tracking loop.
 
 ## Data flow
 
@@ -29,6 +30,20 @@ is exercised only through an injected transport or the explicit serial tool.
 3. `TargetSelector.select()` chooses one `Target`, or no target.
 4. `PTZController.command_for()` produces a bounded absolute `PTZCommand`.
 5. `Actuator.apply()` sends that command to a simulated or physical mechanism.
+
+For physical actuation the startup order is fixed:
+
+1. parse and validate configuration and CLI interlocks;
+2. construct the OpenCV source and Ultralytics model;
+3. construct selection and control policy;
+4. open serial and complete correlated `HELLO`/`READY`/`DISABLE`;
+5. call `ENABLE` only when the backend is `arduino_serial` and
+   `--arm-hardware` was supplied; and
+6. enter the loop.
+
+Camera or model construction failure therefore occurs before serial opening or
+servo enablement. A serial handshake failure closes resources without calling
+`ENABLE`.
 
 The proportional controller applies per-axis pixel deadbands, normalized proportional gain, maximum step limits, and servo-angle limits. Positive image x/y error increases logical pan/tilt. `ArduinoSerialActuator` maps those logical values through per-axis directions and offsets to integer physical degrees. The host checks logical and physical limits; firmware independently rejects anything outside compile-time limits. Lost-target policy remains in the controller.
 
@@ -61,3 +76,29 @@ Live-camera read failure raises `CameraReadError`. Every terminal read path
 releases the capture, and OpenCV validates grayscale or supported channel
 shapes at the capture boundary. Optional vision libraries and model weights
 are loaded only when a real vision component is constructed.
+
+Runtime shutdown is coordinated in ordinary control flow. A local signal
+handler records only a termination request; the loop performs cleanup. Motion
+shutdown is attempted first, then the actuator transport, writer, source, and
+display resources are closed idempotently. Finite-media EOF, frame limits, and
+display `q` return CLI status 0. SIGINT and SIGTERM are operationally expected
+shutdown requests after bounded cleanup, but `main()` returns their conventional
+Unix statuses 130 and 143. A component-raised `OperationCancelled` is normal
+only when the shared termination predicate is true; otherwise it is an
+actionable failure chained to the original exception and returns status 2.
+Detection, malformed frame, camera, serial, actuator, annotation, writer, and
+other unexpected failures also return status 2. `run_vision()` returns a
+processed-frame count only; `main()` owns the process-status contract. Cleanup
+failures are reported alongside the primary failure rather than silently
+replacing it.
+
+Cancellation is checked after source/model construction, before serial open,
+after the serial `HELLO`/`READY`/`DISABLE` handshake, immediately before
+`ENABLE`, and before/after every capture, inference, selection, control, and
+dispatch boundary. `ArduinoSerialActuator` receives the runtime's predicate
+without changing the base `Actuator` protocol. It observes cancellation before
+and after its one bounded rate-limit sleep and immediately before an `ENABLE`,
+`CENTER`, or `SET` transport write. Once a boundary observes cancellation, no
+new `ENABLE` or `SET` is initiated. A write already handed to the serial/OS
+layer may still complete; ordinary control flow then attempts bounded
+`DISABLE` and resource cleanup.

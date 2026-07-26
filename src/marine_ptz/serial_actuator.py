@@ -7,6 +7,7 @@ import math
 from numbers import Real
 import time
 
+from .cancellation import OperationCancelled
 from .config import SerialConfig
 from .serial_protocol import (
     AckResponse,
@@ -42,6 +43,10 @@ from .types import AngleLimits, PTZCommand
 MAX_UNRELATED_RESPONSES = 8
 
 
+def _never_cancel() -> bool:
+    return False
+
+
 class SerialActuatorError(RuntimeError):
     """Base failure raised by the host Arduino actuator."""
 
@@ -72,6 +77,7 @@ class ArduinoSerialActuator:
         transport: SerialTransport | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
+        cancellation_requested: Callable[[], bool] = _never_cancel,
     ) -> None:
         if not pan_limits.contains(initial_pan_deg):
             raise ValueError("initial pan angle must be within logical pan limits")
@@ -85,6 +91,9 @@ class ArduinoSerialActuator:
         self._transport = transport
         self._monotonic = monotonic
         self._sleep = sleep
+        if not callable(cancellation_requested):
+            raise ValueError("cancellation_requested must be callable")
+        self._cancellation_requested = cancellation_requested
         self._next_sequence = MIN_SEQUENCE
         self._connected = False
         self._enabled = False
@@ -158,6 +167,15 @@ class ArduinoSerialActuator:
     def physical_tilt_deg(self) -> int:
         return self._physical_tilt_deg
 
+    def set_cancellation_predicate(
+        self,
+        cancellation_requested: Callable[[], bool],
+    ) -> None:
+        """Bind a runtime-owned cancellation predicate without changing Actuator."""
+        if not callable(cancellation_requested):
+            raise ValueError("cancellation_requested must be callable")
+        self._cancellation_requested = cancellation_requested
+
     def open(self) -> None:
         if self._closed:
             raise SerialActuatorConnectionError("serial actuator is closed")
@@ -230,6 +248,7 @@ class ArduinoSerialActuator:
 
     def enable(self) -> None:
         self._require_connected()
+        self._raise_if_cancelled()
         response = self._acknowledged(EnableCommand(self._take_sequence()), "ENABLE")
         try:
             self._validate_neutral_ack(response, "ENABLE")
@@ -249,6 +268,7 @@ class ArduinoSerialActuator:
 
     def center(self) -> None:
         self._require_enabled()
+        self._raise_if_cancelled()
         response = self._acknowledged(CenterCommand(self._take_sequence()), "CENTER")
         try:
             self._validate_neutral_ack(response, "CENTER")
@@ -281,6 +301,7 @@ class ArduinoSerialActuator:
 
     def apply(self, command: PTZCommand) -> None:
         self._require_enabled()
+        self._raise_if_cancelled()
         pan = _finite_logical_degree(command.pan_deg, "command.pan_deg")
         tilt = _finite_logical_degree(command.tilt_deg, "command.tilt_deg")
         if not self._pan_limits.contains(pan):
@@ -299,6 +320,7 @@ class ArduinoSerialActuator:
         )
         self._validate_physical_target(physical_pan, physical_tilt)
         self._wait_for_command_slot()
+        self._raise_if_cancelled()
         response = self._acknowledged(
             SetCommand(self._take_sequence(), physical_pan, physical_tilt),
             "SET",
@@ -436,9 +458,20 @@ class ArduinoSerialActuator:
         transport = self._require_transport()
         encoded = encode_command(command)
         last_malformed: ProtocolError | None = None
+        motion_command = isinstance(command, (SetCommand, CenterCommand, EnableCommand))
+        motion_write_started = False
         for _attempt in range(self._settings.retries + 1):
+            if motion_command:
+                try:
+                    self._raise_if_cancelled()
+                except OperationCancelled:
+                    if motion_write_started:
+                        self._mark_uncertain_for(command)
+                    raise
             try:
                 transport.write(encoded)
+                if motion_command:
+                    motion_write_started = True
                 for _ in range(MAX_UNRELATED_RESPONSES):
                     frame = transport.read_frame(MAX_FRAME_LENGTH)
                     if frame is None:
@@ -611,12 +644,20 @@ class ArduinoSerialActuator:
             raise SerialActuatorError("serial actuator is disabled")
 
     def _wait_for_command_slot(self) -> None:
+        self._raise_if_cancelled()
         if self._last_set_time is None:
             return
         interval = 1.0 / self._settings.command_rate_hz
         remaining = interval - (self._monotonic() - self._last_set_time)
         if remaining > 0.0:
             self._sleep(remaining)
+            self._raise_if_cancelled()
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancellation_requested():
+            raise OperationCancelled(
+                "serial motion dispatch cancelled before transport submission"
+            )
 
     def _sleep_until(self, deadline: float) -> None:
         remaining = deadline - self._monotonic()
