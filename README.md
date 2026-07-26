@@ -11,8 +11,12 @@ The laptop owns capture, detection, target selection, control, telemetry, and se
 The hardware-independent synthetic slice and a real OpenCV + Ultralytics vision
 pipeline are implemented. The vision pipeline reads a camera or media file,
 detects configured marine classes, selects a target, and drives only the
-simulated PTZ actuator. Arduino, serial, and physical-actuator backends remain
-unimplemented.
+    simulated PTZ actuator. A bounded Arduino protocol, lazy host serial actuator,
+    in-memory firmware model, and Uno firmware foundation are implemented and
+    compile successfully for an Arduino Uno. They have not been uploaded or
+    bench-verified. The synthetic and vision
+tracking demos never select physical actuation; only the serial protocol tool
+can do so when an operator explicitly supplies `--port`.
 
 ## Layout
 
@@ -168,12 +172,82 @@ invocation, and replace existing reports atomically after a complete
 same-directory write is flushed to disk. See
 [benchmark methodology and preliminary results](docs/benchmarks.md).
 
+## Arduino serial foundation
+
+The compile-only firmware baseline is verified with:
+
+- Arduino CLI `1.5.1`;
+- Arduino AVR Boards `arduino:avr@1.8.8`;
+- official Servo library `Servo@1.3.0`; and
+- Arduino Uno FQBN `arduino:avr:uno`.
+
+With those prerequisites installed in the Arduino CLI user data directory, the
+reproducible compile command is:
+
+```bash
+ARDUINO_BUILD_DIR="$(mktemp -d)"
+arduino-cli compile \
+  --fqbn arduino:avr:uno \
+  --warnings all \
+  --build-path "${ARDUINO_BUILD_DIR}" \
+  firmware/ptz_controller
+```
+
+The pre-remediation compile used 7,856 bytes of flash (24%) and 705 bytes of
+static RAM (34%). After adding the rejected-command retry cache, the current
+compile uses 8,120 bytes of flash (25%) and 715 bytes of static RAM (34%).
+Warnings emitted with `--warnings all` originate only from the official
+`arduino:avr@1.8.8` core's `new.cpp`; project firmware compiles without
+warnings. Upload and physical validation remain pending.
+
+The default protocol demonstration is hardware-free:
+
+```bash
+python tools/serial_protocol_demo.py
+```
+
+It uses the in-memory transport and firmware state model. It does not import
+pyserial or open a device. Explicit serial probing requires the optional
+hardware extra and an explicit port:
+
+```bash
+python -m pip install --editable ".[hardware]"
+python tools/serial_protocol_demo.py --port /dev/ttyACM0
+```
+
+Do not run the physical form until wiring, limits, directions, neutral angles,
+servo current, and device identity have been verified. The serial actuator is
+not yet composed into `marine_ptz.demo` or `marine_ptz.vision_cli`.
+
+Opening an Uno serial port may reset the board. The host deliberately allows a
+bounded 2-second boot grace and requires a sequence-correlated `READY` plus
+`DISABLE` before reporting connected. Startup announces
+`READY 0 1 0.1.0`; `HELLO N` must receive `READY N 1 0.1.0`.
+
+The protocol uses 115200-baud newline-delimited ASCII, a 63-byte payload limit
+for either LF or CRLF, canonical signed-32-bit integer tokens, correlated
+1–65535 sequences, bounded idempotent retries, strict range checks, and an
+Arduino watchdog that detaches outputs after communication loss. While outputs
+remain enabled, an identical retry of an acknowledged `SET` refreshes the
+watchdog; after expiry it returns `NOT_ENABLED`. Rejected or conflicting
+duplicates never refresh the watchdog. See the
+[firmware protocol](firmware/ptz_controller/README.md).
+
+Host writes use one elapsed PySerial write deadline and do not call a blocking
+output drain. Successful local write completion means the complete frame was
+accepted by the OS/driver; only its correlated firmware response confirms the
+command end to end. A semantically impossible ACK or STATUS faults the local
+session, blocks motion, and requires an explicit successful `open()` handshake
+before actuation can resume.
+
 ## Configuration
 
 `configs/development.yaml` selects the synthetic camera and simulated actuator.
 `configs/hardware.yaml` records the OpenCV/Ultralytics vision defaults and
-future Arduino settings. The vision CLI always uses simulated actuation and
-does not open a serial device. Configuration loading alone never starts
+candidate Arduino serial, mapping, physical-limit, neutral, and watchdog
+settings, plus the boot grace and total handshake deadline. The vision CLI
+always uses simulated actuation and does not open a serial device.
+Configuration loading and serial-actuator construction alone never start
 hardware.
 
 See [architecture](docs/architecture.md), [wiring](docs/wiring.md), and the [test plan](docs/test_plan.md) before connecting equipment.

@@ -23,7 +23,22 @@ detection:
 serial:
   device: /dev/ttyACM0
   baudrate: 115200
-  timeout_s: 0.25
+  read_timeout_s: 0.25
+  write_timeout_s: 0.25
+  retries: 2
+  command_rate_hz: 10.0
+  watchdog_timeout_s: 1.0
+  boot_grace_seconds: 2.0
+  handshake_timeout_seconds: 4.0
+  handshake_retry_interval_seconds: 0.25
+  pan_direction: 1
+  tilt_direction: 1
+  pan_offset_deg: 0.0
+  tilt_offset_deg: 0.0
+  physical_pan_limits_deg: [20.0, 160.0]
+  physical_tilt_limits_deg: [35.0, 145.0]
+  neutral_pan_deg: 90.0
+  neutral_tilt_deg: 90.0
 
 actuator:
   backend: arduino_serial

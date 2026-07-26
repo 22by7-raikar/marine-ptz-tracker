@@ -43,7 +43,19 @@ def test_configuration_validation_reports_clear_path(
         ("development.yaml", "confidence_threshold: 0.60", "detection.confidence_threshold"),
         ("development.yaml", "initial_pan_deg: 90.0", "actuator.initial_pan_deg"),
         ("development.yaml", "max_step_deg: 3.0", "tracking.max_step_deg"),
-        ("hardware.yaml", "timeout_s: 0.25", "serial.timeout_s"),
+        ("hardware.yaml", "read_timeout_s: 0.25", "serial.read_timeout_s"),
+        ("hardware.yaml", "pan_offset_deg: 0.0", "serial.pan_offset_deg"),
+        ("hardware.yaml", "boot_grace_seconds: 2.0", "serial.boot_grace_seconds"),
+        (
+            "hardware.yaml",
+            "handshake_timeout_seconds: 4.0",
+            "serial.handshake_timeout_seconds",
+        ),
+        (
+            "hardware.yaml",
+            "handshake_retry_interval_seconds: 0.25",
+            "serial.handshake_retry_interval_seconds",
+        ),
     ],
 )
 @pytest.mark.parametrize("invalid", [".nan", ".inf", "-.inf"])
@@ -97,6 +109,14 @@ def test_hardware_config_loads_with_required_physical_fields() -> None:
     assert config.camera.device == "/dev/video0"
     assert config.serial is not None
     assert config.serial.device == "/dev/ttyACM0"
+    assert config.serial.baudrate == 115200
+    assert config.serial.read_timeout_s == 0.25
+    assert config.serial.write_timeout_s == 0.25
+    assert config.serial.retries == 2
+    assert config.serial.watchdog_timeout_s == 1.0
+    assert config.serial.boot_grace_seconds == 2.0
+    assert config.serial.handshake_timeout_seconds == 4.0
+    assert config.serial.handshake_retry_interval_seconds == 0.25
 
 
 def test_v4l2_camera_requires_device(tmp_path: Path) -> None:
@@ -109,23 +129,102 @@ def test_v4l2_camera_requires_device(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("replacement", "message"),
-    [
-        (
-            "serial:\n  device: /dev/ttyACM0\n  baudrate: 115200\n  timeout_s: 0.25\n\n",
-            "",
-        ),
-        ("  baudrate: 115200\n", ""),
-    ],
+    "missing",
+    ["section", "baudrate"],
 )
 def test_arduino_serial_requires_serial_settings(
     tmp_path: Path,
-    replacement: str,
-    message: str,
+    missing: str,
 ) -> None:
     source = Path("configs/hardware.yaml").read_text(encoding="utf-8")
+    if missing == "section":
+        source = re.sub(r"serial:\n(?:  .+\n)+\n(?=actuator:)", "", source)
+    else:
+        source = source.replace("  baudrate: 115200\n", "")
     invalid_path = tmp_path / "missing-serial.yaml"
-    invalid_path.write_text(source.replace(replacement, message), encoding="utf-8")
+    invalid_path.write_text(source, encoding="utf-8")
 
     with pytest.raises(ConfigError, match="serial"):
         load_config(invalid_path)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "field"),
+    [
+        ("device: /dev/ttyACM0", 'device: ""', "serial.device"),
+        ("baudrate: 115200", "baudrate: 12345", "serial.baudrate"),
+        ("read_timeout_s: 0.25", "read_timeout_s: 0", "serial.read_timeout_s"),
+        ("write_timeout_s: 0.25", "write_timeout_s: 11", "serial.write_timeout_s"),
+        ("retries: 2", "retries: 6", "serial.retries"),
+        ("command_rate_hz: 10.0", "command_rate_hz: 0", "serial.command_rate_hz"),
+        ("watchdog_timeout_s: 1.0", "watchdog_timeout_s: 61", "serial.watchdog_timeout_s"),
+        ("watchdog_timeout_s: 1.0", "watchdog_timeout_s: 0.1", "serial.watchdog_timeout_s"),
+        ("boot_grace_seconds: 2.0", "boot_grace_seconds: -1", "serial.boot_grace_seconds"),
+        (
+            "handshake_timeout_seconds: 4.0",
+            "handshake_timeout_seconds: 31",
+            "serial.handshake_timeout_seconds",
+        ),
+        (
+            "handshake_retry_interval_seconds: 0.25",
+            "handshake_retry_interval_seconds: 0",
+            "serial.handshake_retry_interval_seconds",
+        ),
+        ("pan_direction: 1", "pan_direction: 0", "serial.pan_direction"),
+        ("tilt_direction: 1", "tilt_direction: 2", "serial.tilt_direction"),
+        ("neutral_pan_deg: 90.0", "neutral_pan_deg: 180.0", "serial.neutral_pan_deg"),
+    ],
+)
+def test_serial_configuration_rejects_unsafe_values(
+    tmp_path: Path,
+    old: str,
+    new: str,
+    field: str,
+) -> None:
+    source = Path("configs/hardware.yaml").read_text(encoding="utf-8")
+    invalid = tmp_path / "unsafe-serial.yaml"
+    invalid.write_text(source.replace(old, new), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=field):
+        load_config(invalid)
+
+
+def test_serial_mapping_must_fit_physical_limits(tmp_path: Path) -> None:
+    source = Path("configs/hardware.yaml").read_text(encoding="utf-8")
+    invalid = tmp_path / "unsafe-mapping.yaml"
+    invalid.write_text(
+        source.replace("pan_direction: 1", "pan_direction: -1"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="maps outside"):
+        load_config(invalid)
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "field"),
+    [
+        (
+            "boot_grace_seconds: 2.0",
+            "boot_grace_seconds: 4.0",
+            "serial.boot_grace_seconds",
+        ),
+        (
+            "handshake_retry_interval_seconds: 0.25",
+            "handshake_retry_interval_seconds: 4.0",
+            "serial.handshake_retry_interval_seconds",
+        ),
+    ],
+)
+def test_serial_startup_intervals_must_fit_handshake_deadline(
+    tmp_path: Path,
+    old: str,
+    new: str,
+    field: str,
+) -> None:
+    source = Path("configs/hardware.yaml").read_text(encoding="utf-8")
+    invalid = tmp_path / "unsafe-startup.yaml"
+    invalid.write_text(source.replace(old, new), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=field):
+        load_config(invalid)

@@ -6,7 +6,7 @@ import subprocess
 import sys
 
 
-OPTIONAL_ROOTS = ("numpy", "cv2", "torch", "torchvision", "ultralytics")
+OPTIONAL_ROOTS = ("numpy", "cv2", "torch", "torchvision", "ultralytics", "serial")
 
 
 def _environment() -> dict[str, str]:
@@ -54,7 +54,7 @@ def test_vision_components_report_actionable_missing_dependency_errors() -> None
 import importlib.abc
 import sys
 
-blocked = {"cv2", "torch", "torchvision", "ultralytics", "numpy"}
+blocked = {"cv2", "torch", "torchvision", "ultralytics", "numpy", "serial"}
 
 class Blocker(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
@@ -65,7 +65,12 @@ class Blocker(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, Blocker())
 
 from marine_ptz.opencv_source import OpenCVDependencyError, OpenCVSource
+from marine_ptz.serial_actuator import ArduinoSerialActuator
+from marine_ptz.serial_transport import PySerialTransport, SerialDependencyError
 from marine_ptz.yolo_detector import UltralyticsDependencyError, UltralyticsDetector
+
+assert ArduinoSerialActuator.__name__ == "ArduinoSerialActuator"
+assert "serial" not in sys.modules
 
 try:
     OpenCVSource("video.mp4")
@@ -80,6 +85,20 @@ except UltralyticsDependencyError as exc:
     assert "constrained vision dependencies" in str(exc)
 else:
     raise AssertionError("UltralyticsDetector did not report its missing dependency")
+
+transport = PySerialTransport(
+    "/dev/never-opened",
+    baudrate=115200,
+    read_timeout_s=0.1,
+    write_timeout_s=0.1,
+)
+assert "serial" not in sys.modules
+try:
+    transport.open()
+except SerialDependencyError as exc:
+    assert "optional hardware dependencies" in str(exc)
+else:
+    raise AssertionError("PySerialTransport did not report its missing dependency")
 """
     )
 

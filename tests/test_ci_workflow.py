@@ -41,6 +41,7 @@ def test_ci_workflow_has_hardware_free_base_dev_job() -> None:
     assert 'pytest -m "not hardware and not gpu"' in commands
     assert "python -m pip check" in commands
     assert ".[vision]" not in commands
+    assert ".[hardware]" not in commands
 
 
 def test_ci_workflow_uses_pip_cache() -> None:

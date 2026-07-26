@@ -17,6 +17,7 @@ marine-ptz-vision = "marine_ptz.vision_cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]
+hardware = ["pyserial>=3.5,<4"]
 vision = [
     "torch==2.11.0",
     "torchvision==0.26.0",

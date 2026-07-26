@@ -12,12 +12,12 @@ Camera, detector, target-selection, control, and actuator dependencies are repre
 
 The laptop performs vision and policy. The Arduino's future firmware will validate its serial protocol, reject unsafe angles, and drive servo signals. This keeps the time-sensitive actuator boundary simple and inspectable.
 
-## 2026-07-23: Defer model and transport choices
+## 2026-07-23: Defer model and transport choices (superseded)
 
 Superseded for the prototype vision milestone on 2026-07-24. At the time of
 this decision, no detection model, camera backend library, serial package, or
-firmware framework had been chosen. Serial transport and firmware choices
-remain deferred until hardware bench measurements are available.
+firmware framework had been chosen. Vision choices were superseded on
+2026-07-24, and serial transport/protocol choices were superseded on 2026-07-25.
 
 ## 2026-07-24: Build the first slice with deterministic synthetic components
 
@@ -45,3 +45,28 @@ The selected prototype choices are OpenCV capture, Ultralytics inference, and
 `yolo11n.pt` as the configurable default model; callers may supply another
 model name or local path. This milestone deliberately retains simulated
 actuation even when the camera and detector are real.
+
+## 2026-07-25: Use a bounded ASCII serial protocol and detached watchdog state
+
+The Uno protocol uses printable newline-delimited ASCII with fixed token
+counts, canonical signed-32-bit integers, 16-bit nonzero command sequence IDs,
+and a 63-byte payload bound for LF or CRLF. Startup uses sequence-zero
+announcements and sequence-correlated `HELLO` responses. JSON and Arduino
+`String` are excluded to keep RAM use and parsing behavior predictable.
+Same-sequence retries are idempotent; only a duplicate of an acknowledged
+`SET` refreshes the watchdog. Host and firmware both enforce limits without
+silently clamping malformed wire values.
+
+Pyserial is isolated in an optional hardware extra and imported only by an
+explicit transport open. The actuator retains logical controller coordinates
+while direction/offset mapping produces bounded physical degrees. The firmware
+starts detached, attaches at neutral only after `ENABLE`, and detaches on
+`DISABLE` or watchdog expiry. This is a prototype communication safety policy,
+not an emergency-stop certification. Existing synthetic and vision composition
+continues to use simulated actuation.
+
+Opening an Uno serial device may cause its normal auto-reset. The host uses a
+bounded boot grace, total handshake deadline, repeated identical `HELLO`, and a
+correlated `DISABLE`; it does not suppress or manually pulse DTR/RTS. Firmware
+services its watchdog before and after bounded serial work and emits pending
+CRLF responses incrementally according to available TX capacity.
