@@ -65,7 +65,22 @@ class TrackingConfig:
 class SerialConfig:
     device: str
     baudrate: int
-    timeout_s: float
+    read_timeout_s: float
+    write_timeout_s: float
+    retries: int
+    command_rate_hz: float
+    watchdog_timeout_s: float
+    boot_grace_seconds: float
+    handshake_timeout_seconds: float
+    handshake_retry_interval_seconds: float
+    pan_direction: int
+    tilt_direction: int
+    pan_offset_deg: float
+    tilt_offset_deg: float
+    physical_pan_limits: AngleLimits
+    physical_tilt_limits: AngleLimits
+    neutral_pan_deg: float
+    neutral_tilt_deg: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +144,8 @@ def _validate_backend_requirements(
         raise ConfigError("camera.device is required when camera.source is 'v4l2'")
     if actuator.backend == "arduino_serial" and serial is None:
         raise ConfigError("serial section is required when actuator.backend is 'arduino_serial'")
+    if actuator.backend == "arduino_serial" and serial is not None:
+        _validate_serial_mapping(actuator, serial)
 
 
 def _runtime_config(data: Mapping[str, Any]) -> RuntimeConfig:
@@ -267,14 +284,203 @@ def _tracking_config(data: Mapping[str, Any]) -> TrackingConfig:
 
 def _serial_config(data: Mapping[str, Any]) -> SerialConfig:
     path = "serial"
-    _only_keys(data, {"device", "baudrate", "timeout_s"}, path)
+    _only_keys(
+        data,
+        {
+            "device",
+            "baudrate",
+            "read_timeout_s",
+            "write_timeout_s",
+            "retries",
+            "command_rate_hz",
+            "watchdog_timeout_s",
+            "boot_grace_seconds",
+            "handshake_timeout_seconds",
+            "handshake_retry_interval_seconds",
+            "pan_direction",
+            "tilt_direction",
+            "pan_offset_deg",
+            "tilt_offset_deg",
+            "physical_pan_limits_deg",
+            "physical_tilt_limits_deg",
+            "neutral_pan_deg",
+            "neutral_tilt_deg",
+        },
+        path,
+    )
     baudrate = _integer(data, "baudrate", path)
-    timeout = _number(data, "timeout_s", path)
-    if baudrate <= 0:
-        raise ConfigError("serial.baudrate must be greater than zero")
-    if timeout < 0:
-        raise ConfigError("serial.timeout_s must be zero or greater")
-    return SerialConfig(_string(data, "device", path), baudrate, timeout)
+    if baudrate not in {9_600, 19_200, 38_400, 57_600, 115_200}:
+        raise ConfigError("serial.baudrate must be a supported standard baud rate")
+    read_timeout = _bounded_positive_number(data, "read_timeout_s", path, 10.0)
+    write_timeout = _bounded_positive_number(data, "write_timeout_s", path, 10.0)
+    retries = _integer(data, "retries", path)
+    if not 0 <= retries <= 5:
+        raise ConfigError("serial.retries must be between 0 and 5")
+    command_rate = _bounded_positive_number(data, "command_rate_hz", path, 100.0)
+    watchdog_timeout = _bounded_positive_number(
+        data,
+        "watchdog_timeout_s",
+        path,
+        60.0,
+    )
+    if watchdog_timeout <= 2.0 / command_rate:
+        raise ConfigError(
+            "serial.watchdog_timeout_s must exceed two serial command intervals"
+        )
+    boot_grace = _bounded_nonnegative_number(
+        data,
+        "boot_grace_seconds",
+        path,
+        10.0,
+    )
+    handshake_timeout = _bounded_positive_number(
+        data,
+        "handshake_timeout_seconds",
+        path,
+        30.0,
+    )
+    handshake_retry_interval = _bounded_positive_number(
+        data,
+        "handshake_retry_interval_seconds",
+        path,
+        5.0,
+    )
+    if boot_grace >= handshake_timeout:
+        raise ConfigError(
+            "serial.boot_grace_seconds must be less than "
+            "serial.handshake_timeout_seconds"
+        )
+    if handshake_retry_interval >= handshake_timeout:
+        raise ConfigError(
+            "serial.handshake_retry_interval_seconds must be less than "
+            "serial.handshake_timeout_seconds"
+        )
+    pan_direction = _direction(data, "pan_direction", path)
+    tilt_direction = _direction(data, "tilt_direction", path)
+    pan_offset = _number(data, "pan_offset_deg", path)
+    tilt_offset = _number(data, "tilt_offset_deg", path)
+    physical_pan_limits = _limits(data, "physical_pan_limits_deg", path)
+    physical_tilt_limits = _limits(data, "physical_tilt_limits_deg", path)
+    neutral_pan = _number(data, "neutral_pan_deg", path)
+    neutral_tilt = _number(data, "neutral_tilt_deg", path)
+    _validate_protocol_limits(physical_pan_limits, "serial.physical_pan_limits_deg")
+    _validate_protocol_limits(physical_tilt_limits, "serial.physical_tilt_limits_deg")
+    _validate_protocol_angle(neutral_pan, "serial.neutral_pan_deg")
+    _validate_protocol_angle(neutral_tilt, "serial.neutral_tilt_deg")
+    if not physical_pan_limits.contains(neutral_pan):
+        raise ConfigError(
+            "serial.neutral_pan_deg must be within serial.physical_pan_limits_deg"
+        )
+    if not physical_tilt_limits.contains(neutral_tilt):
+        raise ConfigError(
+            "serial.neutral_tilt_deg must be within serial.physical_tilt_limits_deg"
+        )
+    return SerialConfig(
+        _string(data, "device", path),
+        baudrate,
+        read_timeout,
+        write_timeout,
+        retries,
+        command_rate,
+        watchdog_timeout,
+        boot_grace,
+        handshake_timeout,
+        handshake_retry_interval,
+        pan_direction,
+        tilt_direction,
+        pan_offset,
+        tilt_offset,
+        physical_pan_limits,
+        physical_tilt_limits,
+        neutral_pan,
+        neutral_tilt,
+    )
+
+
+def _validate_serial_mapping(
+    actuator: ActuatorConfig,
+    serial: SerialConfig,
+) -> None:
+    for axis, logical, physical, direction, offset, initial, neutral in (
+        (
+            "pan",
+            actuator.pan_limits,
+            serial.physical_pan_limits,
+            serial.pan_direction,
+            serial.pan_offset_deg,
+            actuator.initial_pan_deg,
+            serial.neutral_pan_deg,
+        ),
+        (
+            "tilt",
+            actuator.tilt_limits,
+            serial.physical_tilt_limits,
+            serial.tilt_direction,
+            serial.tilt_offset_deg,
+            actuator.initial_tilt_deg,
+            serial.neutral_tilt_deg,
+        ),
+    ):
+        mapped = (
+            direction * logical.minimum_deg + offset,
+            direction * logical.maximum_deg + offset,
+        )
+        if any(not physical.contains(value) for value in mapped):
+            raise ConfigError(
+                f"actuator.{axis}_limits_deg maps outside "
+                f"serial.physical_{axis}_limits_deg"
+            )
+        mapped_initial = direction * initial + offset
+        if abs(mapped_initial - neutral) > 1e-9:
+            raise ConfigError(
+                f"mapped actuator.initial_{axis}_deg must equal "
+                f"serial.neutral_{axis}_deg"
+            )
+
+
+def _bounded_positive_number(
+    data: Mapping[str, Any],
+    key: str,
+    path: str,
+    maximum: float,
+) -> float:
+    value = _number(data, key, path)
+    if not 0.0 < value <= maximum:
+        raise ConfigError(
+            f"{path}.{key} must be greater than zero and at most {maximum:g}"
+        )
+    return value
+
+
+def _bounded_nonnegative_number(
+    data: Mapping[str, Any],
+    key: str,
+    path: str,
+    maximum: float,
+) -> float:
+    value = _number(data, key, path)
+    if not 0.0 <= value <= maximum:
+        raise ConfigError(
+            f"{path}.{key} must be zero or greater and at most {maximum:g}"
+        )
+    return value
+
+
+def _direction(data: Mapping[str, Any], key: str, path: str) -> int:
+    value = _integer(data, key, path)
+    if value not in {-1, 1}:
+        raise ConfigError(f"{path}.{key} must be exactly -1 or 1")
+    return value
+
+
+def _validate_protocol_limits(limits: AngleLimits, field: str) -> None:
+    _validate_protocol_angle(limits.minimum_deg, f"{field}[0]")
+    _validate_protocol_angle(limits.maximum_deg, f"{field}[1]")
+
+
+def _validate_protocol_angle(value: float, field: str) -> None:
+    if not 0.0 <= value <= 180.0 or not value.is_integer():
+        raise ConfigError(f"{field} must be an integer degree value between 0 and 180")
 
 
 def _mapping(value: Any, path: str) -> Mapping[str, Any]:

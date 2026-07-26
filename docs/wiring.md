@@ -1,6 +1,8 @@
 # Wiring and power plan
 
-> Do not power the SG90 servos from the Arduino 5 V pin or USB port.
+> **Do not power two servos from the Arduino 5 V pin or USB port. Use the
+> external regulated 5 V supply for servo power. Connect the external
+> servo-supply ground to Arduino ground.**
 
 ## Intended connections
 
@@ -8,17 +10,28 @@
 | --- | --- | --- |
 | InnoMaker U20CAM-1080P | Ubuntu laptop USB | Verify the discovered `/dev/video*` device before use. |
 | Arduino Uno R3 | Ubuntu laptop USB | Serial device is expected to resemble `/dev/ttyACM0`; do not hard-code discovery assumptions. |
-| Pan SG90 | Arduino digital signal pin (TBD) | Signal only; select and document a non-conflicting pin during firmware work. |
-| Tilt SG90 | Arduino digital signal pin (TBD) | Signal only. |
+| Pan servo | Candidate Arduino digital pin 9 | Signal only; final pin and direction require bench confirmation. |
+| Tilt servo | Candidate Arduino digital pin 10 | Signal only; final pin and direction require bench confirmation. |
 | Both SG90s | External regulated 5 V / 3 A supply | Supply positive to servo V+, negative to servo ground. |
 | Arduino ground | External supply ground | A common ground is required for servo signal reference. |
 
 ## Before applying power
 
 1. Confirm supply polarity and voltage with a meter.
-2. Mechanically center the pan/tilt assembly before attaching horns.
-3. Start with conservative pan/tilt limits; prevent mechanical end-stop contact.
-4. Keep the laptop and Arduino USB connected only after the external supply wiring has been checked.
-5. Test one servo at a time before enabling camera-driven commands.
+2. Disconnect external servo power while changing any wiring.
+3. Mechanically center the pan/tilt assembly before attaching horns.
+4. Start with conservative pan/tilt limits; prevent mechanical end-stop contact.
+5. Keep the laptop and Arduino USB connected only after the external supply wiring has been checked.
+6. Remove the camera from the pan/tilt assembly for the first powered motion test.
+7. Test one servo at a time over a conservative motion range before attaching
+   the second servo or enabling camera-driven commands.
 
-Keep servo power wiring short and suitably sized. If the assembly behaves erratically, remove power and investigate supply capacity, ground continuity, and mechanical binding before changing software.
+USB supplies the Arduino and carries serial data; the external regulated supply
+provides servo current. These power paths serve different roles even though
+their grounds must be common. Verify the final supply current capacity against
+the delivered servo specifications and measured stall behavior rather than
+assuming the candidate 5 V / 3 A supply is sufficient.
+
+Keep servo power wiring short and suitably sized. If the assembly behaves
+erratically, remove power and investigate supply capacity, ground continuity,
+polarity, voltage, and mechanical binding before changing software.
