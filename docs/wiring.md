@@ -9,7 +9,7 @@
 | Device | Connection | Notes |
 | --- | --- | --- |
 | InnoMaker U20CAM-1080P | Ubuntu laptop USB | Verify the discovered `/dev/video*` device before use. |
-| Arduino Uno R3 | Ubuntu laptop USB | Serial device is expected to resemble `/dev/ttyACM0`; do not hard-code discovery assumptions. |
+| Arduino Uno R3 | Ubuntu laptop USB | Record its stable `/dev/serial/by-id/...` identity after verification; do not hard-code or guess a `/dev/tty*` path. |
 | Pan servo | Candidate Arduino digital pin 9 | Signal only; final pin and direction require bench confirmation. |
 | Tilt servo | Candidate Arduino digital pin 10 | Signal only; final pin and direction require bench confirmation. |
 | Both SG90s | External regulated 5 V / 3 A supply | Supply positive to servo V+, negative to servo ground. |
@@ -31,6 +31,10 @@ provides servo current. These power paths serve different roles even though
 their grounds must be common. Verify the final supply current capacity against
 the delivered servo specifications and measured stall behavior rather than
 assuming the candidate 5 V / 3 A supply is sufficient.
+
+`/dev/serial/by-id/<verified-uno>` is a documentation/configuration template,
+not a device identity. Replace it with the exact discovered path before any
+armed run.
 
 Keep servo power wiring short and suitably sized. If the assembly behaves
 erratically, remove power and investigate supply capacity, ground continuity,

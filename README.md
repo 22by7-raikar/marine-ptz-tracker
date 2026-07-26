@@ -2,11 +2,13 @@
 
 [![CI](https://github.com/22by7-raikar/marine-ptz-tracker/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/22by7-raikar/marine-ptz-tracker/actions/workflows/ci.yml)
 
-Foundation for a laptop-driven system that detects and follows a small marine target with a USB camera, a two-servo pan/tilt assembly, and an Arduino Uno.
+Laptop-driven system for detecting and following a small marine target with a
+USB camera, a two-servo pan/tilt assembly, and an Arduino Uno. The laptop owns
+perception and control; the Uno is the bounded servo-command safety boundary.
 
 The laptop owns capture, detection, target selection, control, telemetry, and serial communication. The Arduino only validates bounded pan/tilt commands and drives the servos. Hardware is intentionally not accessed at import time.
 
-## Status
+## Current validation status
 
 The hardware-independent synthetic slice and the unified OpenCV + Ultralytics
 runtime are implemented. The runtime reads a camera or finite media source,
@@ -15,10 +17,21 @@ bounded controller, and drives either the simulated actuator or the
 explicitly armed Arduino serial actuator.
 
 The bounded Arduino protocol, lazy host serial actuator, in-memory firmware
-model, and Uno firmware compile successfully. They have not been uploaded or
-bench-verified. Physical actuation is fail-closed: it requires the hardware
+model, and Uno firmware compile successfully in local and remote CI. They have
+not been uploaded or bench-verified. Physical actuation is fail-closed: it requires the hardware
 configuration, explicit `--arm-hardware`, and an explicit serial path from the
 CLI or validated configuration. The runtime never discovers a serial port.
+
+Software-only evidence currently includes 540 hardware/GPU-independent tests,
+Python 3.10 and 3.11 CI, and an Arduino Uno compile-only CI job. The current
+Uno build uses 8,120 bytes of flash (25%) and 715 bytes of static RAM (34%).
+These are software and toolchain results—not camera, serial, servo, or
+end-to-end physical results.
+
+> **Hardware warning:** Do not connect or power servos until the staged
+> [demo runbook](docs/demo_runbook.md) safety checks and calibration evidence
+> have been completed. The watchdog is a communication fallback, not an
+> emergency stop.
 
 ## Layout
 
@@ -42,6 +55,11 @@ Use `--no-sleep` for a deterministic run without real-time pacing:
 ```bash
 PYTHONPATH=src python -m marine_ptz.demo --config configs/development.yaml --steps 20 --no-sleep
 ```
+
+This is the safest complete demonstration: it uses deterministic synthetic
+frames and simulated actuation, so it opens no camera, serial port, or GPU.
+The complete staged procedure—including replay, compile-only firmware, and
+pending physical stages—is in [docs/demo_runbook.md](docs/demo_runbook.md).
 
 Run the hardware-independent checks with:
 
@@ -170,7 +188,7 @@ conda run -n marine_ptz python -m marine_ptz.vision_cli \
   --device cuda:0 \
   --target-class boat \
   --actuator-backend arduino_serial \
-  --serial-port /dev/ttyACM0 \
+  --serial-port /dev/serial/by-id/<verified-uno> \
   --arm-hardware \
   --display
 ```
@@ -181,6 +199,12 @@ power, and common ground have been bench-verified. Omitting
 `--actuator-backend` uses the validated configuration: development selects
 simulation, while the hardware configuration selects `arduino_serial` and
 therefore still refuses to start without `--arm-hardware`.
+
+The checked-in hardware configuration deliberately contains
+`/dev/serial/by-id/<verified-uno>`, not a usable device identity. Before every
+armed run, replace that placeholder for the invocation with the exact stable
+path discovered for the connected Uno (for example via an explicit
+`--serial-port`); never guess a `/dev/tty*` path.
 
 `--source 0` is also camera index 0. Use `--source path:0` for a file literally
 named `0`; other media paths can be passed directly. Target classes may be
@@ -327,7 +351,7 @@ static RAM (34%). After adding the rejected-command retry cache, the current
 compile uses 8,120 bytes of flash (25%) and 715 bytes of static RAM (34%).
 Warnings emitted with `--warnings all` originate only from the official
 `arduino:avr@1.8.8` core's `new.cpp`; project firmware compiles without
-warnings. Remote CI verification, upload, and physical validation remain
+warnings. Remote CI is passing; firmware upload and physical validation remain
 pending.
 
 The default protocol demonstration is hardware-free:
@@ -342,7 +366,7 @@ hardware extra and an explicit port:
 
 ```bash
 python -m pip install --editable ".[hardware]"
-python tools/serial_protocol_demo.py --port /dev/ttyACM0
+python tools/serial_protocol_demo.py --port /dev/serial/by-id/<verified-uno>
 ```
 
 Do not run the physical form until wiring, limits, directions, neutral angles,
@@ -375,11 +399,14 @@ before actuation can resume.
 
 `configs/development.yaml` selects the synthetic camera and simulated actuator.
 `configs/hardware.yaml` records the OpenCV/Ultralytics vision defaults and
-candidate Arduino serial, mapping, physical-limit, neutral, and watchdog
+an unresolved Arduino serial placeholder, mapping, physical-limit, neutral, and watchdog
 settings, plus the boot grace and total handshake deadline. Configuration
 loading and serial-actuator construction alone never start hardware. The
 vision CLI opens serial only when the resolved backend is `arduino_serial`,
 and calls `ENABLE` only after `--arm-hardware` and successful dependency and
 handshake initialization.
 
-See [architecture](docs/architecture.md), [wiring](docs/wiring.md), and the [test plan](docs/test_plan.md) before connecting equipment.
+See [architecture](docs/architecture.md), [wiring](docs/wiring.md), the
+[test plan](docs/test_plan.md), [acceptance criteria](docs/acceptance_criteria.md),
+and the [physical evidence checklist](docs/evidence_checklist.md) before
+connecting equipment.

@@ -25,8 +25,8 @@ The shared helper checks its pinned prerequisites and may be run locally as
 that it owns unless a caller supplies a build directory. The locally observed
 Uno footprint is 8,120 bytes of flash (25%) and 715 bytes of static RAM (34%).
 Warnings from the official AVR core's `new.cpp` may appear with all warnings
-enabled; project firmware sources have no observed warnings. Remote CI and
-physical hardware validation remain pending until their respective checks run.
+enabled; project firmware sources have no observed warnings. Remote CI has
+passed; physical hardware validation remains pending.
 
 ## Pytest categories
 
@@ -140,8 +140,9 @@ override, and mid-frame disconnects. Startup tests cover boot grace, lost
 deadline boundary, partial-open cleanup, and sequence wrap.
 
 Run `python tools/serial_protocol_demo.py` for a fake-only handshake and command
-cycle. A future bench operator may explicitly provide `--port /dev/ttyACM0`
-after wiring review and installation of `.[hardware]`; that physical probe is
+cycle. A future bench operator may explicitly provide
+`--port /dev/serial/by-id/<verified-uno>` after wiring review and installation
+of `.[hardware]`; that physical probe is
 outside ordinary CI. The unified runtime adds independent
 `arduino_serial`/`--arm-hardware` gates and never enumerates a port.
 
