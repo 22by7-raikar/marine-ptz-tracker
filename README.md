@@ -300,7 +300,8 @@ replay. See [offline replay methodology](docs/replay.md).
 
 ## Arduino serial foundation
 
-The compile-only firmware baseline is verified with:
+The compile-only firmware baseline is configured as a separate GitHub Actions
+job. It compiles only—never uploads or enumerates serial devices—using:
 
 - Arduino CLI `1.5.1`;
 - Arduino AVR Boards `arduino:avr@1.8.8`;
@@ -308,23 +309,26 @@ The compile-only firmware baseline is verified with:
 - Arduino Uno FQBN `arduino:avr:uno`.
 
 With those prerequisites installed in the Arduino CLI user data directory, the
-reproducible compile command is:
+same reproducible local and CI command is:
 
 ```bash
-ARDUINO_BUILD_DIR="$(mktemp -d)"
-arduino-cli compile \
-  --fqbn arduino:avr:uno \
-  --warnings all \
-  --build-path "${ARDUINO_BUILD_DIR}" \
-  firmware/ptz_controller
+tools/compile_arduino.sh
 ```
+
+Pass an optional temporary build directory when it must be retained for local
+inspection: `tools/compile_arduino.sh "$(mktemp -d)"`. The helper checks the
+pinned CLI, core, and library but does not install anything; CI performs the
+pinned installation first and writes builds only under the runner temporary
+directory. Set `ARDUINO_CLI` or `ARDUINO_CLI_CONFIG_DIR` when either location
+is outside your shell's defaults.
 
 The pre-remediation compile used 7,856 bytes of flash (24%) and 705 bytes of
 static RAM (34%). After adding the rejected-command retry cache, the current
 compile uses 8,120 bytes of flash (25%) and 715 bytes of static RAM (34%).
 Warnings emitted with `--warnings all` originate only from the official
 `arduino:avr@1.8.8` core's `new.cpp`; project firmware compiles without
-warnings. Upload and physical validation remain pending.
+warnings. Remote CI verification, upload, and physical validation remain
+pending.
 
 The default protocol demonstration is hardware-free:
 

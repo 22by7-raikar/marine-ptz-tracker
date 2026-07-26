@@ -10,6 +10,24 @@
   independent golden vectors used by the Python firmware model. Arduino AVR
   compilation is a separate compile-only check described below.
 
+## Arduino Uno compile-only CI
+
+GitHub Actions is configured with a separate Ubuntu firmware job that checks
+out with read-only credentials, installs Arduino CLI `1.5.1`,
+`arduino:avr@1.8.8`, and official `Servo@1.3.0`, then compiles
+`firmware/ptz_controller` for `arduino:avr:uno` with `--warnings all`. It uses
+`tools/compile_arduino.sh` with a build directory under the runner temporary
+directory. The job never calls `upload`, probes serial devices, accesses
+hardware, or uploads build artifacts.
+
+The shared helper checks its pinned prerequisites and may be run locally as
+`tools/compile_arduino.sh`; it creates and removes only a temporary directory
+that it owns unless a caller supplies a build directory. The locally observed
+Uno footprint is 8,120 bytes of flash (25%) and 715 bytes of static RAM (34%).
+Warnings from the official AVR core's `new.cpp` may appear with all warnings
+enabled; project firmware sources have no observed warnings. Remote CI and
+physical hardware validation remain pending until their respective checks run.
+
 ## Pytest categories
 
 - `unit` is the default for unmarked deterministic tests.

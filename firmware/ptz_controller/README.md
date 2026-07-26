@@ -185,24 +185,28 @@ types and fixed buffers. Hardware-free tests compile them with strong host
 compiler warnings and compare their exact output against independently
 maintained golden vectors also used by the Python model.
 
-The compile-only Arduino baseline uses Arduino CLI `1.5.1`, Arduino AVR Boards
-`arduino:avr@1.8.8`, the official `Servo@1.3.0` library, and FQBN
-`arduino:avr:uno`:
+The configured GitHub Actions firmware job and the shared local compile helper
+use Arduino CLI `1.5.1`, Arduino AVR Boards `arduino:avr@1.8.8`, the official
+`Servo@1.3.0` library, and FQBN `arduino:avr:uno`. They compile only; they do
+not upload firmware or inspect serial devices:
 
 ```bash
-ARDUINO_BUILD_DIR="$(mktemp -d)"
-arduino-cli compile \
-  --fqbn arduino:avr:uno \
-  --warnings all \
-  --build-path "${ARDUINO_BUILD_DIR}" \
-  firmware/ptz_controller
+tools/compile_arduino.sh
 ```
+
+The helper checks those installed prerequisites and accepts an optional build
+directory. Without one it creates and removes its own temporary directory;
+CI supplies a build directory under the runner temporary directory. It never
+installs packages or uploads a sketch. `ARDUINO_CLI` and
+`ARDUINO_CLI_CONFIG_DIR` can select non-default local locations without
+embedding machine-specific paths in the script.
 
 The pre-remediation result was 7,856 bytes of flash (24%) and 705 bytes of
 static RAM (34%). The current result, including the rejected-`SET` retry cache,
 is 8,120 bytes of flash (25%) and 715 bytes of static RAM (34%). Current
 warnings come only from the official AVR core's `new.cpp`; project sources
-produce no warnings. Firmware upload and physical verification remain pending.
+produce no warnings. Remote CI verification, firmware upload, and physical
+verification remain pending.
 
 Servo power must come from the external regulated 5 V supply with a common
 Arduino ground. See [wiring](../../docs/wiring.md) before applying power.
