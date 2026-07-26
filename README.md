@@ -204,7 +204,7 @@ produce a nonzero CLI status.
 | SIGINT-requested shutdown | 130 |
 | SIGTERM-requested shutdown | 143 |
 | Unexpected `OperationCancelled` without a recorded runtime termination request | 2 |
-| Detector, source, protocol, actuator, configuration, or cleanup failure | 2 |
+| Detector, source, protocol, actuator, configuration, observer, or cleanup failure | 2 |
 
 Signal-requested shutdown is operationally expected: the runtime records the
 request, completes bounded cleanup, and stops issuing new motion commands.
@@ -212,6 +212,14 @@ The nonzero 130/143 statuses follow normal Unix signal conventions rather than
 indicating that cleanup was skipped or that an operator cancellation was a
 runtime defect. `run_vision()` returns a processed-frame count for library
 callers; `main()` alone maps runtime outcomes to process statuses.
+
+For offline replay, a control-path failure remains authoritative if the
+processing-end observer or cleanup also fails; those later failures remain
+inspectable diagnostics and no completed report is written. A processing-end
+observer failure after otherwise normal EOF/frame-limit completion is itself a
+failure. The same rule applies during an expected SIGINT/SIGTERM cancellation:
+the observer failure takes precedence and the replay CLI returns 2 after its
+single bounded cleanup pass.
 
 `yolo11n.pt` remains the lightweight configured default. Model weights,
 recordings, and annotated outputs are ignored by Git.
@@ -255,6 +263,40 @@ finite JSON, retain only allowlisted runtime metadata and a sanitized
 invocation, and replace existing reports atomically after a complete
 same-directory write is flushed to disk. See
 [benchmark methodology and preliminary results](docs/benchmarks.md).
+
+## Offline replay acceptance evidence
+
+Offline replay runs one existing local image or finite video through the same
+production OpenCV source, YOLO detector, marine selector, PTZ controller, and
+`SimulatedPTZActuator` used by the unified runtime. It never opens a live
+camera or serial port, and it does not arm an Arduino. It is evidence of
+software behavior on finite media, not evidence of toy-boat accuracy, camera
+performance, or physical servo tracking.
+
+Use a local model path to avoid a possible named-model download:
+
+```bash
+python -m marine_ptz.replay_cli \
+  --config configs/development.yaml \
+  --source /path/to/local-input.mp4 \
+  --model /path/to/local-yolo11n.pt \
+  --device cpu \
+  --target-class boat \
+  --max-frames 300 \
+  --report artifacts/replay/acceptance.json
+```
+
+`--report` is required. The report is strict finite JSON and atomically
+replaces its destination only after a complete successful replay. Optional
+acceptance limits (`--min-selected-target-ratio`, `--max-p95-inference-ms`,
+`--max-mean-normalized-error`, `--max-p95-normalized-error`,
+`--max-pan-saturation-count`, and `--max-tilt-saturation-count`) are all
+reported with their actual value and pass/fail result. A failed supplied limit
+writes the report and exits with status 3; normal EOF or `--max-frames` exits
+0; invalid input, decode/inference failure, report-write failure, or unexpected
+runtime failure exits 2; SIGINT/SIGTERM use 130/143. A hardware configuration
+requires explicit `--replay-safe` before it can be used for simulated-only
+replay. See [offline replay methodology](docs/replay.md).
 
 ## Arduino serial foundation
 

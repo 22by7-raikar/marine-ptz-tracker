@@ -66,6 +66,11 @@ A separate first CLI inference observation of **1249.5 ms** is cold
 initialization, not steady-state latency, and must not be compared to the warm
 sample statistics above.
 
+Offline replay is a separate tool and evidence type. It runs finite local media
+through the full source/detector/selector/controller/simulated-actuator path
+and records acceptance metrics, but it is not a blank-frame inference benchmark
+and does not establish physical tracking. See [offline replay](replay.md).
+
 ## Future result template
 
 | Scenario | Camera | Target | Model/input | Warm-up / measured | Mean | p95 | End-to-end notes |

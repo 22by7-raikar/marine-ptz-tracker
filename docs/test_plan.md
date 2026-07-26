@@ -81,6 +81,20 @@ Ultralytics, and pyserial remain unloaded. Existing rendering tests cover
 display `q`, annotation failure, writer construction/open/write failures, and
 resource release without opening a real display or file.
 
+## Offline replay checks
+
+Replay tests inject finite fake image/video sources, detector outputs, and
+monotonic clocks into the production runtime. They cover zero/one/multiple
+frames, no requested target, immediate and delayed acquisition, post-acquisition
+lost-target episodes, latency/error percentiles, command count/rate, inclusive
+simulated saturation, EOF, max-frame completion, decode/detector failure,
+cancellation, threshold pass/failure/unavailable metrics, strict JSON, atomic
+report preservation, path collisions, and hardware-option rejection. They do
+not decode a real file, load YOLO weights, access CUDA, display a window, or
+open a serial device. The acceptance report is therefore software evidence;
+real media, toy-boat evaluation, and physical-servo acceptance remain manual
+future work.
+
 These tests validate software ordering and failure policy only. Physical
 camera enumeration and EOF behavior for specific codecs, CUDA inference,
 serial device identity and permissions, Uno reset timing, firmware upload,

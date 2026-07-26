@@ -96,3 +96,15 @@ cancellation starts no new `ENABLE` or `SET`; an already submitted write may
 still complete. Primary runtime and cleanup failures are both reported. These
 interlocks reduce accidental motion; they do not create a safety-rated
 emergency-stop system or replace pending physical validation.
+
+## 2026-07-26: Measure offline replay through a runtime observer
+
+Offline acceptance reporting observes successful iterations of the existing
+unified runtime rather than creating another detector/controller loop. The
+replay path fixes actuation to the existing simulated actuator and reuses the
+benchmark module's sanitized strict JSON and atomic writer. This keeps report
+metrics (target acquisition/loss, normalized error, command rate, and limit
+saturation) separate from the generic runtime while ensuring they describe the
+same selection and control behavior that production uses. No default acceptance
+limits are claimed; future toy-boat and physical evidence must set and record
+their own reviewed thresholds.
