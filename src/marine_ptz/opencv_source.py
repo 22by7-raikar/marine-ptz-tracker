@@ -115,6 +115,18 @@ class OpenCVSource:
     def is_live(self) -> bool:
         return self._is_live
 
+    @property
+    def is_image(self) -> bool:
+        """Return whether the finite-media path has a recognized image suffix."""
+        return self._is_image
+
+    @property
+    def total_frames(self) -> int | None:
+        """Return finite-media frame count when OpenCV provides a usable value."""
+        if self._frame_count is None or not self._frame_count.is_integer():
+            return None
+        return int(self._frame_count)
+
     def read(self) -> Frame | None:
         if self._closed:
             return None

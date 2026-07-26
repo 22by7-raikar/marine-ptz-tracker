@@ -13,14 +13,15 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, NoReturn, Protocol
 
 from .actuators import SimulatedPTZActuator
 from .cancellation import OperationCancelled
 from .config import AppConfig, ConfigError, load_config
 from .opencv_source import OpenCVSource, OpenCVSourceError, parse_source_argument
 from .tracking import MarineTargetSelector, ProportionalPTZController
-from .types import Detection, Frame, Target
+from .types import AngleLimits, Detection, Frame, PTZCommand, Target
 from .yolo_detector import UltralyticsDetector, UltralyticsDetectorError
 
 
@@ -47,6 +48,97 @@ class RuntimeCleanupError(RuntimeError):
 
 class UnexpectedCancellationError(RuntimeError):
     """Raised when a component cancels without a runtime termination request."""
+
+
+class RuntimeSecondaryFailures(RuntimeError):
+    """Inspectable observer and cleanup failures attached to a primary error.
+
+    Python 3.10 has neither ``ExceptionGroup`` nor ``BaseException.add_note``.
+    This exception is therefore used as the chained diagnostic context while
+    the control-path exception remains the exception raised to the caller.
+    """
+
+    def __init__(
+        self,
+        *,
+        observer_error: BaseException | None,
+        cleanup_errors: tuple[Exception, ...],
+    ) -> None:
+        self.observer_error = observer_error
+        self.cleanup_errors = cleanup_errors
+        message = (
+            f"processing-end observer failed: {observer_error}"
+            if observer_error is not None
+            else "resource cleanup failed"
+        )
+        if cleanup_errors:
+            message += f"; cleanup also failed: {cleanup_errors[0]}"
+        super().__init__(message)
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeStartEvent:
+    """Immutable production-runtime snapshot emitted before frame processing."""
+
+    processing_started_s: float
+    source_type: str
+    total_frames_available: int | None
+    resolved_device: str
+    actuator_backend: str
+    initial_pan_deg: float
+    initial_tilt_deg: float
+    pan_limits: AngleLimits
+    tilt_limits: AngleLimits
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeFrameEvent:
+    """Immutable snapshot of one successfully applied production-loop command."""
+
+    processing_timestamp_s: float
+    frame_sequence: int
+    frame_width: int
+    frame_height: int
+    detection_count: int
+    selected_detection: Detection | None
+    command: PTZCommand
+    actuator_pan_deg: float
+    actuator_tilt_deg: float
+    inference_ms: float
+    resolved_device: str
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeProcessingEndEvent:
+    """Immutable boundary between frame processing and bounded cleanup."""
+
+    processing_ended_s: float
+    processed_frames: int
+    exit_reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeCompleteEvent:
+    """Immutable normal-completion snapshot emitted after cleanup succeeds."""
+
+    processed_frames: int
+    exit_reason: str
+
+
+class RuntimeObserver(Protocol):
+    """Observe immutable snapshots without access to runtime components."""
+
+    def on_start(self, event: RuntimeStartEvent) -> None:
+        """Observe the processing-start boundary."""
+
+    def on_frame(self, event: RuntimeFrameEvent) -> None:
+        """Observe one successfully applied command."""
+
+    def on_processing_end(self, event: RuntimeProcessingEndEvent) -> None:
+        """Observe the pre-cleanup processing-end boundary."""
+
+    def on_complete(self, event: RuntimeCompleteEvent) -> None:
+        """Observe normal completion after bounded cleanup succeeds."""
 
 
 @dataclass(slots=True)
@@ -145,6 +237,7 @@ def run_vision(
     sleep: Callable[[float], None] = time.sleep,
     stop_requested: Callable[[], bool] = _never_terminated,
     emit: Callable[[str], None] = print,
+    observer: RuntimeObserver | None = None,
 ) -> int:
     """Run the unified pipeline and return the number of processed frames."""
     _validate_options(config, options)
@@ -152,11 +245,29 @@ def run_vision(
     resources = _RuntimeResources(display=options.display)
     processed = 0
     frame_times: deque[float] = deque(maxlen=31)
+    exit_reason = "eof"
+    processing_started_s: float | None = None
+    processing_end_notified = False
+    observer_started = False
     rate_limiter = _CommandRateLimiter(
         config.tracking.update_rate_hz,
         monotonic=rate_monotonic,
         sleep=sleep,
     )
+
+    def finish_processing(reason: str) -> None:
+        nonlocal processing_end_notified
+        if processing_end_notified or processing_started_s is None:
+            return
+        processing_end_notified = True
+        if observer is not None and observer_started:
+            observer.on_processing_end(
+                RuntimeProcessingEndEvent(
+                    processing_ended_s=_runtime_timestamp(monotonic),
+                    processed_frames=processed,
+                    exit_reason=reason,
+                )
+            )
 
     try:
         # Startup ordering is safety-critical. Hardware construction and opening
@@ -194,6 +305,22 @@ def run_vision(
         else:
             actuator = actuator_factory(config, options)
         resources.actuator = actuator
+        if observer is not None:
+            processing_started_s = _runtime_timestamp(monotonic)
+            observer.on_start(
+                RuntimeStartEvent(
+                    processing_started_s=processing_started_s,
+                    source_type=_source_type(source, options.source),
+                    total_frames_available=_total_frames_available(source),
+                    resolved_device=str(detector.active_device),
+                    actuator_backend=options.actuator_backend,
+                    initial_pan_deg=float(actuator.pan_deg),
+                    initial_tilt_deg=float(actuator.tilt_deg),
+                    pan_limits=config.actuator.pan_limits,
+                    tilt_limits=config.actuator.tilt_limits,
+                )
+            )
+            observer_started = True
         if options.actuator_backend == "arduino_serial":
             _bind_cancellation_predicate(actuator, stop_requested)
             _raise_if_terminated(stop_requested)
@@ -210,10 +337,14 @@ def run_vision(
             _raise_if_terminated(stop_requested)
             _hardware_method(actuator, "enable")()
 
-        while options.max_frames is None or processed < options.max_frames:
+        while True:
+            if options.max_frames is not None and processed >= options.max_frames:
+                exit_reason = "max_frames"
+                break
             _raise_if_terminated(stop_requested)
             frame = source.read()
             if frame is None:
+                exit_reason = "eof"
                 break
             _raise_if_terminated(stop_requested)
             _validate_runtime_frame(frame)
@@ -227,7 +358,23 @@ def run_vision(
             _raise_if_terminated(stop_requested)
             actuator.apply(command)
 
-            now = monotonic()
+            now = _runtime_timestamp(monotonic) if observer is not None else monotonic()
+            event = RuntimeFrameEvent(
+                processing_timestamp_s=now,
+                frame_sequence=frame.sequence,
+                frame_width=frame.width,
+                frame_height=frame.height,
+                detection_count=len(detections),
+                selected_detection=None if target is None else target.detection,
+                command=command,
+                actuator_pan_deg=float(actuator.pan_deg),
+                actuator_tilt_deg=float(actuator.tilt_deg),
+                inference_ms=float(detector.last_inference_ms),
+                resolved_device=str(detector.active_device),
+            )
+            if observer is not None:
+                observer.on_frame(event)
+
             frame_times.append(now)
             rolling_fps = _rolling_fps(frame_times)
             error = _target_error(frame, target)
@@ -271,16 +418,45 @@ def run_vision(
                     resources.cv2.imshow("Marine PTZ Tracker", rendered)
                     if resources.cv2.waitKey(1) & 0xFF == ord("q"):
                         processed += 1
+                        exit_reason = "display_q"
                         break
             processed += 1
     except OperationCancelled as cancellation:
+        observer_error: BaseException | None = None
+        try:
+            finish_processing("cancelled" if stop_requested() else "failure")
+        except BaseException as error:
+            observer_error = error
         cleanup_errors = resources.close()
         if stop_requested():
+            # Cancellation is expected only while the shared predicate is
+            # true. An observer failure is still a lifecycle failure and is
+            # deliberately stronger than that otherwise-normal cancellation.
+            if observer_error is not None:
+                if cleanup_errors:
+                    _raise_primary_with_secondary_failures(
+                        observer_error,
+                        observer_error.__traceback__,
+                        None,
+                        cleanup_errors,
+                    )
+                raise observer_error from cancellation
             if cleanup_errors:
                 raise RuntimeCleanupError(
                     f"termination requested; cleanup failed: {cleanup_errors[0]}"
                 ) from cleanup_errors[0]
             return processed
+        if observer_error is not None:
+            unexpected = UnexpectedCancellationError(
+                "unexpected OperationCancelled without a recorded termination "
+                f"request: {cancellation}"
+            )
+            _raise_primary_with_secondary_failures(
+                unexpected,
+                unexpected.__traceback__,
+                observer_error,
+                cleanup_errors,
+            )
         if cleanup_errors:
             raise RuntimeCleanupError(
                 "unexpected OperationCancelled without a recorded termination "
@@ -291,7 +467,20 @@ def run_vision(
             f"request: {cancellation}"
         ) from cancellation
     except BaseException as primary:
+        primary_traceback = primary.__traceback__
+        observer_error: BaseException | None = None
+        try:
+            finish_processing("failure")
+        except BaseException as error:
+            observer_error = error
         cleanup_errors = resources.close()
+        if observer_error is not None:
+            _raise_primary_with_secondary_failures(
+                primary,
+                primary_traceback,
+                observer_error,
+                cleanup_errors,
+            )
         if cleanup_errors:
             raise RuntimeCleanupError(
                 f"runtime failed with {type(primary).__name__}: {primary}; "
@@ -299,12 +488,45 @@ def run_vision(
             ) from primary
         raise
 
+    try:
+        finish_processing(exit_reason)
+    except BaseException as observer_error:
+        cleanup_errors = resources.close()
+        if cleanup_errors:
+            _raise_primary_with_secondary_failures(
+                observer_error,
+                observer_error.__traceback__,
+                None,
+                cleanup_errors,
+            )
+        raise
     cleanup_errors = resources.close()
     if cleanup_errors:
         raise RuntimeCleanupError(
             f"resource cleanup failed: {cleanup_errors[0]}"
         ) from cleanup_errors[0]
+    if observer is not None:
+        observer.on_complete(RuntimeCompleteEvent(processed, exit_reason))
     return processed
+
+
+def _raise_primary_with_secondary_failures(
+    primary: BaseException,
+    primary_traceback: TracebackType | None,
+    observer_error: BaseException | None,
+    cleanup_errors: tuple[Exception, ...],
+) -> NoReturn:
+    """Raise the control-path failure with every later failure inspectable.
+
+    The direct cause deliberately holds structured diagnostics rather than an
+    observer error alone, so an observer and one or more cleanup failures are
+    all retained without replacing the original runtime failure.
+    """
+    diagnostic = RuntimeSecondaryFailures(
+        observer_error=observer_error,
+        cleanup_errors=cleanup_errors,
+    )
+    raise primary.with_traceback(primary_traceback) from diagnostic
 
 
 def _capture_cleanup_error(
@@ -320,6 +542,26 @@ def _capture_cleanup_error(
 def _raise_if_terminated(stop_requested: Callable[[], bool]) -> None:
     if stop_requested():
         raise OperationCancelled("runtime termination requested")
+
+
+def _runtime_timestamp(monotonic: Callable[[], float]) -> float:
+    value = monotonic()
+    if not isinstance(value, Real) or isinstance(value, bool) or not math.isfinite(float(value)):
+        raise RuntimeError("monotonic clock returned a non-finite value")
+    return float(value)
+
+
+def _source_type(source: Any, configured_source: int | str) -> str:
+    if bool(getattr(source, "is_live", isinstance(configured_source, int))):
+        return "camera"
+    return "image" if bool(getattr(source, "is_image", False)) else "video"
+
+
+def _total_frames_available(source: Any) -> int | None:
+    total = getattr(source, "total_frames", None)
+    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+        return total
+    return None
 
 
 def _bind_cancellation_predicate(

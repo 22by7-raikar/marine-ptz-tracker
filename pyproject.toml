@@ -14,6 +14,7 @@ dependencies = ["PyYAML>=6.0"]
 [project.scripts]
 marine-ptz-demo = "marine_ptz.demo:main"
 marine-ptz-vision = "marine_ptz.vision_cli:main"
+marine-ptz-replay = "marine_ptz.replay_cli:main"
 
 [project.optional-dependencies]
 dev = ["pytest>=7"]

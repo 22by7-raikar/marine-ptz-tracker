@@ -25,6 +25,7 @@ class SimulatedPTZActuator:
         self._pan_deg = initial_pan_deg
         self._tilt_deg = initial_tilt_deg
         self._last_sequence: int | None = None
+        self._apply_count = 0
         self._closed = False
 
     @property
@@ -39,12 +40,18 @@ class SimulatedPTZActuator:
     def last_sequence(self) -> int | None:
         return self._last_sequence
 
+    @property
+    def apply_count(self) -> int:
+        """Return successful command applications, including hold commands."""
+        return self._apply_count
+
     def apply(self, command: PTZCommand) -> None:
         if self._closed:
             raise RuntimeError("simulated actuator is closed")
         self._pan_deg = self._pan_limits.clamp(command.pan_deg)
         self._tilt_deg = self._tilt_limits.clamp(command.tilt_deg)
         self._last_sequence = command.sequence
+        self._apply_count += 1
 
     def close(self) -> None:
         self._closed = True

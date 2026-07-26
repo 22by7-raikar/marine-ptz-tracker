@@ -166,11 +166,7 @@ class BenchmarkReport:
                 "warm": self.warm.to_dict(),
                 "ultralytics_speed": dict(self.ultralytics_speed_ms),
             },
-            "environment": {
-                name: self.environment[name]
-                for name in sorted(_ENVIRONMENT_METADATA_KEYS)
-                if name in self.environment
-            },
+            "environment": allowlisted_environment_metadata(self.environment),
         }
         return _json_compatible(payload)
 
@@ -186,6 +182,13 @@ class DeviceAdapter(Protocol):
 
     def environment(self) -> Mapping[str, object]:
         """Describe the active benchmark runtime."""
+
+
+class JsonReport(Protocol):
+    """Minimal report shape accepted by the shared strict atomic writer."""
+
+    def to_dict(self) -> Mapping[str, object]:
+        """Return a JSON-compatible report payload."""
 
 
 @dataclass(slots=True)
@@ -305,7 +308,7 @@ def run_benchmark(
     return report
 
 
-def write_report(report: BenchmarkReport, path: Path) -> None:
+def write_report(report: JsonReport, path: Path) -> None:
     """Atomically replace a report with strict JSON written on the same filesystem."""
     serialized = json.dumps(
         report.to_dict(),
@@ -459,6 +462,23 @@ def _default_components(
         return numpy.zeros((settings.image_size, settings.image_size, 3), dtype=numpy.uint8)
 
     return load_model, load_input, adapter
+
+
+def environment_metadata(resolved_device: str) -> Mapping[str, object]:
+    """Collect the allowlisted vision metadata used by benchmark and replay."""
+    torch = _optional_module("torch")
+    ultralytics = _optional_module("ultralytics")
+    cv2 = _optional_module("cv2")
+    return TorchDeviceAdapter(torch, ultralytics, cv2, resolved_device).environment()
+
+
+def allowlisted_environment_metadata(values: Mapping[str, object]) -> dict[str, object]:
+    """Return only shareable package and GPU metadata for persisted reports."""
+    return {
+        name: values[name]
+        for name in sorted(_ENVIRONMENT_METADATA_KEYS)
+        if name in values
+    }
 
 
 def _write_serialized_report(stream: TextIO, serialized: str) -> None:

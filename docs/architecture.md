@@ -90,7 +90,13 @@ Detection, malformed frame, camera, serial, actuator, annotation, writer, and
 other unexpected failures also return status 2. `run_vision()` returns a
 processed-frame count only; `main()` owns the process-status contract. Cleanup
 failures are reported alongside the primary failure rather than silently
-replacing it.
+replacing it. The same precedence applies to runtime observers: a control-path
+failure remains authoritative, while a processing-end observer failure and any
+cleanup failures are retained in a Python-3.10-compatible
+`RuntimeSecondaryFailures` chained diagnostic. If normal completion or an
+otherwise expected signal cancellation reaches a failing processing-end
+observer, that observer failure is the lifecycle failure and returns status 2;
+no replay completion report is written.
 
 Cancellation is checked after source/model construction, before serial open,
 after the serial `HELLO`/`READY`/`DISABLE` handshake, immediately before
@@ -102,3 +108,17 @@ and after its one bounded rate-limit sleep and immediately before an `ENABLE`,
 new `ENABLE` or `SET` is initiated. A write already handed to the serial/OS
 layer may still complete; ordinary control flow then attempts bounded
 `DISABLE` and resource cleanup.
+
+Offline replay does not duplicate this loop. `run_vision()` has an optional
+observer that receives frozen start, applied-frame, processing-end, and normal
+completion snapshots. No snapshot exposes a source, detector, actuator, serial
+transport, image, mutable detection container, or callback. The processing-end
+snapshot is emitted immediately when the frame loop ends and before bounded
+cleanup, so replay FPS, command rate, and acquisition timing exclude cleanup
+duration. `replay.py` consumes those snapshots for finite-media metrics and
+feeds the existing strict atomic report writer from `benchmark.py`. The replay CLI fixes actuation to
+`SimulatedPTZActuator`, rejects live/serial options, and uses the regular
+source/detector factories only when invoked by an operator with local media and
+a model. Replay report serialization replaces local CLI/configuration paths
+with basename-only markers while retaining generic URL/secret redaction. The
+observer does not own vision, selection, controller, or actuator policy.
