@@ -68,6 +68,13 @@ enforcement, servo attachment, and the communication watchdog. Its loop bounds
 RX bytes and commands, evaluates the watchdog before and after serial work, and
 uses one aggregate fixed-buffer CRLF TX budget after RX processing.
 
+The Uno sketch is also a reproducible compile-only CI boundary: a separate
+read-only Ubuntu job installs the pinned Arduino CLI, AVR core, and Servo
+library before compiling the production sketch with all warnings. It neither
+uploads firmware nor accesses serial hardware; compiled output remains in the
+runner temporary directory. This validates toolchain compatibility, not
+physical behavior.
+
 For `CameraSource.read()`, `None` means evidence indicates normal end-of-file
 for finite media. The OpenCV source compares usable frame-count and position
 metadata when available. Unknown-length media failures raise `MediaReadError`;

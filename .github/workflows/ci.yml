@@ -24,10 +24,10 @@ jobs:
       matrix:
         python-version: ["3.11", "3.10"]
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -48,3 +48,23 @@ jobs:
         run: python -m pytest -m "not hardware and not gpu"
       - name: Dependency consistency
         run: python -m pip check
+
+  firmware:
+    name: Firmware (Arduino Uno)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+      - name: Install Arduino CLI
+        uses: arduino/setup-arduino-cli@81d310742121c928ea9c8bbd407b4217b432ae02 # arduino/setup-arduino-cli v2.0.0, verified upstream commit
+        with:
+          version: "1.5.1"
+      - name: Install pinned Arduino prerequisites
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:avr@1.8.8
+          arduino-cli lib install Servo@1.3.0
+      - name: Compile Uno firmware
+        run: tools/compile_arduino.sh "${RUNNER_TEMP}/marine-ptz-arduino-build"

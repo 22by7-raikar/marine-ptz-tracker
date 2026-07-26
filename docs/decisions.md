@@ -73,6 +73,15 @@ correlated `DISABLE`; it does not suppress or manually pulse DTR/RTS. Firmware
 services its watchdog before and after bounded serial work and emits pending
 CRLF responses incrementally according to available TX capacity.
 
+## 2026-07-26: Compile the production Uno sketch in isolated CI
+
+The production sketch is compiled in a dedicated, read-only GitHub Actions job
+using Arduino CLI `1.5.1`, `arduino:avr@1.8.8`, and `Servo@1.3.0` for
+`arduino:avr:uno` with all warnings. A checked-in helper shares that exact
+compile contract with local development while refusing to install, upload, or
+enumerate hardware. This adds reproducible toolchain coverage without implying
+an upload or physical validation result.
+
 ## 2026-07-26: Use one fail-closed real-vision composition root
 
 `marine_ptz.vision_cli` remains the sole OpenCV/Ultralytics tracking loop and
