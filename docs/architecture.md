@@ -2,6 +2,31 @@
 
 ## Responsibility split
 
+```mermaid
+flowchart LR
+    Media[Camera or finite media] --> Source[OpenCV CameraSource]
+    Source --> YOLO[Ultralytics YOLO Detector]
+    YOLO --> Select[Marine TargetSelector]
+    Select --> Control[Bounded PTZController]
+    Control --> Sim[SimulatedPTZActuator\nsafe default]
+    Control --> Gate{Explicit Arduino backend\nand --arm-hardware?}
+    Gate -->|yes| Host[Host safety checks\nlimits, cancellation, handshake]
+    Host --> Serial[Bounded serial protocol]
+    Serial --> Uno[Uno firmware\nlimits and watchdog]
+    Uno --> Servos[Pan / tilt servos]
+    Source -. frozen runtime events .-> Observer[Telemetry and replay observer]
+    Observer --> Report[Strict atomic JSON report]
+    YOLO -. failure .-> Cleanup[Bounded cleanup\nDISABLE, close, release]
+    Serial -. failure .-> Cleanup
+    Host -. cancellation .-> Cleanup
+    Cleanup -. no new motion after observed cancellation .-> Gate
+```
+
+The Arduino path is unavailable unless the explicit gate is satisfied. The
+diagram describes implemented software boundaries; camera, serial, servo, and
+watchdog behavior still need physical evidence. The watchdog is a
+communication fallback, not an emergency stop.
+
 ```text
 CameraSource -> Detector -> TargetSelector -> PTZController -> Actuator
      |                                                        |

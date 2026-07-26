@@ -108,7 +108,10 @@ def test_hardware_config_loads_with_required_physical_fields() -> None:
 
     assert config.camera.device == "/dev/video0"
     assert config.serial is not None
-    assert config.serial.device == "/dev/ttyACM0"
+    assert config.serial.device == "/dev/serial/by-id/<verified-uno>"
+    assert config.serial.device.startswith("/dev/serial/by-id/")
+    assert not config.serial.device.startswith("/dev/tty")
+    assert "<verified-uno>" in config.serial.device
     assert config.serial.baudrate == 115200
     assert config.serial.read_timeout_s == 0.25
     assert config.serial.write_timeout_s == 0.25
@@ -151,7 +154,7 @@ def test_arduino_serial_requires_serial_settings(
 @pytest.mark.parametrize(
     ("old", "new", "field"),
     [
-        ("device: /dev/ttyACM0", 'device: ""', "serial.device"),
+        ("device: /dev/serial/by-id/<verified-uno>", 'device: ""', "serial.device"),
         ("baudrate: 115200", "baudrate: 12345", "serial.baudrate"),
         ("read_timeout_s: 0.25", "read_timeout_s: 0", "serial.read_timeout_s"),
         ("write_timeout_s: 0.25", "write_timeout_s: 11", "serial.write_timeout_s"),

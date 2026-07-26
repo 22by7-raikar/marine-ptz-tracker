@@ -1,0 +1,24 @@
+# Acceptance criteria
+
+This table distinguishes checked software/toolchain behavior from evidence that
+must be collected on real media and hardware. Fields marked `<fill>` require
+measurement and reviewer agreement; they are intentionally not invented here.
+
+| ID | Requirement | Measurement | Pass criterion | Evidence | Current status | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| A1 | Layer boundaries stay hardware-independent by default. | CI-equivalent tests and import isolation. | Tests pass without camera, serial, CUDA, or weights. | CI results; `docs/architecture.md`. | PASS — software validated | 540 hardware/GPU-independent tests at this handoff. |
+| A2 | Cancellation and cleanup remain bounded. | Fake runtime/serial tests. | Cleanup and fault/cancellation contracts pass. | `tests/test_end_to_end_runtime.py`; `docs/architecture.md`. | PASS — software validated | Does not prove physical disable delivery after power/USB loss. |
+| B1 | The toy boat is detected on representative recorded media. | Reviewed replay/media sample. | Detection ratio and confidence threshold: `<fill after measurement and review>`. | Sanitized replay JSON and annotated samples. | PENDING — real media | No toy-boat result is claimed. |
+| B2 | Detection behaves acceptably under target ambiguity. | Representative multi-object recordings. | Class/selection policy review: `<fill>`. | Replay report and reviewer notes. | PENDING — real media | Synthetic selector behavior is separately tested. |
+| C1 | Controller commands are bounded and deterministic. | Synthetic controller tests. | Center/deadband/direction/clamp/lost-target tests pass. | `tests/test_tracking.py`. | PASS — software validated | Synthetic geometry is not physical tracking accuracy. |
+| C2 | Toy-boat tracking error is acceptable. | Replay plus reviewed ground truth or annotation. | Error and reacquisition targets: `<fill after initial measurements>`. | Replay JSON, labeling method, reviewer sign-off. | PENDING — real media | No tracking-error threshold is preset. |
+| D1 | Uno source compiles reproducibly. | Pinned Arduino CLI/core/library compile. | `arduino:avr:uno` compile succeeds. | Firmware CI; `tools/compile_arduino.sh`. | PASS — AVR compile validated | Current footprint: 8,120 flash bytes (25%), 715 RAM bytes (34%). |
+| D2 | Serial handshake and fault policy work with a real Uno. | No-servo handshake/fault transcript. | Correlated `HELLO`/`READY`/`DISABLE` and safe fault observations: `<fill>`. | Terminal transcript and exact `/dev/serial/by-id/...` board identity. | PENDING — serial | Host/fake firmware tests do not replace this bench check; replace the checked-in `<verified-uno>` placeholder before any armed run. |
+| D3 | Watchdog safely detaches after communication loss. | Controlled no-load disconnect test. | Measured timeout/detach behavior: `<fill>`. | Video/transcript and measurement. | PENDING — serial | Software/firmware-model tests pass; physical watchdog proof is pending. It is not an emergency stop. |
+| E1 | Camera enumerates and produces stable supported frames. | Camera formats, resolution, FPS, and soak capture. | Chosen format/FPS and stability criteria: `<fill>`. | V4L2/OpenCV record and sample video. | PENDING — camera | Do not assume a `/dev/video*` identity. |
+| E2 | Inference performance is suitable on the intended camera path. | Camera-to-detection timing. | Reviewed latency budget: `<fill>`. | Telemetry and benchmark method. | PENDING — camera | Blank-frame model benchmark is not this measurement. |
+| F1 | Each servo has a safe calibrated range and neutral. | One- then two-axis calibration. | Direction, neutral, min/max, clearance, and power observations approved. | Completed runbook tables and photos. | PENDING — servo | Start with one servo and camera removed. |
+| F2 | Mechanics and supply remain stable. | Motion and soak observations. | Settling, overshoot, thermal/current criteria: `<fill after measurements>`. | Meter data, video, review notes. | PENDING — servo | No settling/overshoot target is preset. |
+| G1 | End-to-end target following is safe and observable. | Controlled physical run. | Reviewed target behavior, lost-target response, and shutdown: `<fill>`. | Video, telemetry, safety checklist. | PENDING — end-to-end | Requires all preceding gates. |
+| H1 | A reviewer can reproduce software evidence. | Clean documented commands and CI. | Synthetic demo, tests, smoke check, and compile-only helper complete. | README, runbook, CI logs. | PASS — software validated | Arduino compile is additionally AVR-validated. |
+| H2 | Presentation separates known evidence from pending work. | Handoff review. | Slides/evidence labels match this table. | `docs/presentation_outline.md`; checklist. | PASS — software validated | Physical placeholders must remain labeled pending. |

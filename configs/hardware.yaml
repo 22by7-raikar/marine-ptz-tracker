@@ -1,4 +1,6 @@
 # Intended deployment values. Verify device paths and calibrated limits before use.
+# This is deliberately unresolved; replace it with the exact discovered stable
+# path before an armed run. Never guess a /dev/tty* device.
 runtime:
   mode: hardware
   telemetry_enabled: true
@@ -21,7 +23,7 @@ detection:
     - boat
 
 serial:
-  device: /dev/ttyACM0
+  device: /dev/serial/by-id/<verified-uno>
   baudrate: 115200
   read_timeout_s: 0.25
   write_timeout_s: 0.25

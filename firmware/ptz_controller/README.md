@@ -205,7 +205,7 @@ The pre-remediation result was 7,856 bytes of flash (24%) and 705 bytes of
 static RAM (34%). The current result, including the rejected-`SET` retry cache,
 is 8,120 bytes of flash (25%) and 715 bytes of static RAM (34%). Current
 warnings come only from the official AVR core's `new.cpp`; project sources
-produce no warnings. Remote CI verification, firmware upload, and physical
+produce no warnings. Remote CI has passed; firmware upload and physical
 verification remain pending.
 
 Servo power must come from the external regulated 5 V supply with a common
