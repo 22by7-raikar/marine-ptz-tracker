@@ -19,12 +19,16 @@ class FakeCuda:
     def __init__(self, available: bool, count: int = 1) -> None:
         self._available = available
         self._count = count
+        self.synchronized_devices: list[int] = []
 
     def is_available(self) -> bool:
         return self._available
 
     def device_count(self) -> int:
         return self._count
+
+    def synchronize(self, device: int) -> None:
+        self.synchronized_devices.append(device)
 
 
 class FakeBoxes:
@@ -110,6 +114,22 @@ def test_out_of_range_cuda_index_fails_clearly() -> None:
 
     with pytest.raises(InferenceDeviceError, match="only 1 CUDA"):
         resolve_inference_device("cuda:2", torch_module=torch)
+
+
+def test_detector_exposes_cuda_synchronization_for_runtime_warmup() -> None:
+    cuda = FakeCuda(True, count=2)
+    torch = SimpleNamespace(cuda=cuda)
+    model = FakeModel([], {})
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cuda:1",
+        model_factory=lambda _name: model,
+        torch_module=torch,
+    )
+
+    detector.synchronize()
+
+    assert cuda.synchronized_devices == [1]
 
 
 def test_result_conversion_uses_model_names_filters_and_clamps() -> None:

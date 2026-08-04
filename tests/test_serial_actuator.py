@@ -16,6 +16,7 @@ from marine_ptz.serial_actuator import (
     SerialActuatorTimeoutError,
 )
 from marine_ptz.serial_protocol import (
+    MAX_SEQUENCE,
     AckResponse,
     CenterCommand,
     DisableCommand,
@@ -23,7 +24,6 @@ from marine_ptz.serial_protocol import (
     ErrorCode,
     ErrorResponse,
     HelloCommand,
-    MAX_SEQUENCE,
     ReadyResponse,
     SetCommand,
     StatusCommand,
@@ -36,7 +36,8 @@ from marine_ptz.serial_transport import (
     InMemorySerialTransport,
     SerialTransportError,
 )
-from marine_ptz.types import PTZCommand
+from marine_ptz.tracking import ProportionalPTZController
+from marine_ptz.types import Detection, Frame, PTZCommand, Target
 
 
 def _firmware(config: AppConfig) -> FirmwareStateMachine:
@@ -87,7 +88,8 @@ def test_handshake_enable_set_status_and_protocol_conformance() -> None:
     assert actuator.connected is True
     assert actuator.enabled is True
     assert (actuator.pan_deg, actuator.tilt_deg) == (100.0, 80.0)
-    assert (status.pan_deg, status.tilt_deg) == (100, 80)
+    assert (status.pan_deg, status.tilt_deg) == (80, 100)
+    assert (actuator.physical_pan_deg, actuator.physical_tilt_deg) == (80, 100)
     assert transport.reset_count == 1
     actuator.close()
 
@@ -136,6 +138,91 @@ def test_direction_and_offset_mapping_remain_separate_from_logical_state() -> No
 
     assert (actuator.pan_deg, actuator.tilt_deg) == (100.0, 80.0)
     assert (actuator.physical_pan_deg, actuator.physical_tilt_deg) == (80, 100)
+
+
+@pytest.mark.parametrize(
+    ("logical_pan", "expected_physical_pan"),
+    [(75.0, 105), (90.0, 90), (105.0, 75)],
+)
+def test_calibrated_pan_mapping_and_status_conversion(
+    logical_pan: float,
+    expected_physical_pan: int,
+) -> None:
+    config = load_config("configs/hardware.yaml")
+    actuator = _actuator(
+        config,
+        InMemorySerialTransport(_firmware(config).handle_frame),
+    )
+
+    actuator.open()
+    actuator.enable()
+    actuator.apply(PTZCommand(logical_pan, 90.0, sequence=1))
+    status = actuator.status()
+
+    assert actuator.pan_deg == logical_pan
+    assert actuator.physical_pan_deg == expected_physical_pan
+    assert status.pan_deg == expected_physical_pan
+    assert actuator.tilt_deg == 90.0
+    assert actuator.physical_tilt_deg == status.tilt_deg == 90
+
+
+@pytest.mark.parametrize(
+    ("target_y", "expected_logical_tilt", "expected_physical_tilt"),
+    [
+        (75.0, 93.0, 87),
+        (25.0, 87.0, 93),
+        (50.0, 90.0, 90),
+    ],
+)
+def test_calibrated_vertical_mapping_follows_image_direction(
+    target_y: float,
+    expected_logical_tilt: float,
+    expected_physical_tilt: int,
+) -> None:
+    config = load_config("configs/hardware.yaml")
+    frame = Frame(image=None, timestamp_s=0.0, width=100, height=100, sequence=1)
+    target = Target(
+        Detection("person", 0.9, 40.0, target_y - 5.0, 60.0, target_y + 5.0),
+        frame.sequence,
+    )
+    controller = ProportionalPTZController(
+        config.tracking,
+        config.actuator.pan_limits,
+        config.actuator.tilt_limits,
+        initial_pan_deg=config.actuator.initial_pan_deg,
+        initial_tilt_deg=config.actuator.initial_tilt_deg,
+    )
+    command = controller.command_for(frame, target)
+    firmware = _firmware(config)
+    actuator = _actuator(config, InMemorySerialTransport(firmware.handle_frame))
+
+    actuator.open()
+    actuator.enable()
+    actuator.apply(command)
+    status = actuator.status()
+
+    assert command.pan_deg == actuator.pan_deg == 90.0
+    assert command.tilt_deg == actuator.tilt_deg == expected_logical_tilt
+    assert actuator.physical_pan_deg == 90
+    assert actuator.physical_tilt_deg == expected_physical_tilt
+    assert status.tilt_deg == expected_physical_tilt
+
+
+def test_calibrated_mapping_preserves_pan_and_physical_endpoints() -> None:
+    config = load_config("configs/hardware.yaml")
+    firmware = _firmware(config)
+    actuator = _actuator(config, InMemorySerialTransport(firmware.handle_frame))
+
+    actuator.open()
+    actuator.enable()
+    actuator.apply(PTZCommand(75.0, 105.0, sequence=1))
+    assert (actuator.physical_pan_deg, actuator.physical_tilt_deg) == (105, 75)
+    actuator.apply(PTZCommand(105.0, 75.0, sequence=2))
+    assert (actuator.physical_pan_deg, actuator.physical_tilt_deg) == (75, 105)
+    status = actuator.status()
+
+    assert (actuator.pan_deg, actuator.tilt_deg) == (105.0, 75.0)
+    assert (status.pan_deg, status.tilt_deg) == (75, 105)
 
 
 def test_host_rejects_logical_limit_violation_without_writing() -> None:
@@ -200,7 +287,7 @@ def test_stale_acknowledgement_is_ignored_until_correlated_response() -> None:
 
     actuator.apply(PTZCommand(100.0, 80.0, sequence=1))
 
-    assert actuator.physical_pan_deg == 100
+    assert actuator.physical_pan_deg == 80
 
 
 def test_malformed_response_retries_then_reports_clear_error() -> None:
@@ -523,8 +610,8 @@ def test_command_rate_uses_one_bounded_sleep_without_busy_loop() -> None:
     )
     actuator.open()
     actuator.enable()
-    actuator.apply(PTZCommand(100.0, 80.0, sequence=1))
-    actuator.apply(PTZCommand(101.0, 81.0, sequence=2))
+    actuator.apply(PTZCommand(90.0, 90.0, sequence=1))
+    actuator.apply(PTZCommand(91.0, 91.0, sequence=2))
 
     assert sleeps == [pytest.approx(0.1)]
 
@@ -548,14 +635,14 @@ def test_cancellation_during_command_rate_wait_prevents_set_write() -> None:
     )
     actuator.open()
     actuator.enable()
-    actuator.apply(PTZCommand(100.0, 80.0, sequence=1))
+    actuator.apply(PTZCommand(90.0, 90.0, sequence=1))
     writes_before_cancelled_apply = list(transport.writes)
 
     with pytest.raises(OperationCancelled, match="cancelled"):
-        actuator.apply(PTZCommand(101.0, 81.0, sequence=2))
+        actuator.apply(PTZCommand(91.0, 91.0, sequence=2))
 
     assert transport.writes == writes_before_cancelled_apply
-    assert (actuator.pan_deg, actuator.tilt_deg) == (100.0, 80.0)
+    assert (actuator.pan_deg, actuator.tilt_deg) == (90.0, 90.0)
     assert actuator.enabled is True
 
 
@@ -589,11 +676,7 @@ def test_enable_requires_exact_neutral_acknowledgement() -> None:
         responses = firmware.handle_frame(frame)
         if isinstance(command, EnableCommand) and corrupt_command[0]:
             corrupt_command[0] = False
-            return (
-                encode_response(
-                    AckResponse(command.sequence, "ENABLE", 91, 90)
-                ),
-            )
+            return (encode_response(AckResponse(command.sequence, "ENABLE", 91, 90)),)
         return responses
 
     transport = InMemorySerialTransport(responder)
@@ -618,11 +701,7 @@ def test_center_requires_exact_neutral_acknowledgement() -> None:
         command = parse_command(frame)
         responses = firmware.handle_frame(frame)
         if isinstance(command, CenterCommand):
-            return (
-                encode_response(
-                    AckResponse(command.sequence, "CENTER", 90, 91)
-                ),
-            )
+            return (encode_response(AckResponse(command.sequence, "CENTER", 90, 91)),)
         return responses
 
     transport = InMemorySerialTransport(responder)
@@ -838,11 +917,7 @@ def test_invalid_disable_ack_faults_session_and_blocks_motion() -> None:
         responses = firmware.handle_frame(frame)
         if isinstance(command, DisableCommand) and corrupt_disable[0]:
             corrupt_disable[0] = False
-            return (
-                encode_response(
-                    AckResponse(command.sequence, "DISABLE", 0, 90)
-                ),
-            )
+            return (encode_response(AckResponse(command.sequence, "DISABLE", 0, 90)),)
         return responses
 
     transport = InMemorySerialTransport(responder)
@@ -934,7 +1009,10 @@ def test_not_enabled_error_and_expired_status_reconcile_enabled_state() -> None:
     firmware.enabled = False
     firmware.watchdog_state = WatchdogState.EXPIRED
 
-    with pytest.raises(SerialActuatorProtocolError, match="NOT_ENABLED"):
+    with pytest.raises(
+        SerialActuatorProtocolError,
+        match="NOT_ENABLED.*watchdog may have expired",
+    ):
         actuator.apply(PTZCommand(100.0, 80.0, sequence=1))
     assert actuator.enabled is False
 
@@ -955,11 +1033,7 @@ def test_non_state_firmware_error_does_not_mutate_confirmed_state() -> None:
         command = parse_command(frame)
         responses = firmware.handle_frame(frame)
         if isinstance(command, SetCommand):
-            return (
-                encode_response(
-                    ErrorResponse(command.sequence, ErrorCode.OUT_OF_RANGE)
-                ),
-            )
+            return (encode_response(ErrorResponse(command.sequence, ErrorCode.OUT_OF_RANGE)),)
         return responses
 
     transport = InMemorySerialTransport(responder)
@@ -993,11 +1067,7 @@ def test_only_wrong_sequence_acknowledgements_end_in_conservative_timeout() -> N
         responses = firmware.handle_frame(frame)
         if isinstance(command, SetCommand):
             stale = command.sequence - 1 or MAX_SEQUENCE
-            return (
-                encode_response(
-                    AckResponse(stale, "SET", command.pan_deg, command.tilt_deg)
-                ),
-            )
+            return (encode_response(AckResponse(stale, "SET", command.pan_deg, command.tilt_deg)),)
         return responses
 
     transport = InMemorySerialTransport(responder)
@@ -1015,6 +1085,8 @@ def test_only_wrong_sequence_acknowledgements_end_in_conservative_timeout() -> N
 
 def test_half_degree_rounding_and_physical_endpoints_are_explicit() -> None:
     config = load_config("configs/hardware.yaml")
+    assert config.serial is not None
+    serial = config.serial
     firmware = _firmware(config)
     now = [0.0]
 
@@ -1032,13 +1104,21 @@ def test_half_degree_rounding_and_physical_endpoints_are_explicit() -> None:
     actuator.enable()
 
     actuator.apply(PTZCommand(90.5, 89.5, sequence=1))
-    assert (actuator.physical_pan_deg, actuator.physical_tilt_deg) == (91, 90)
+    assert (actuator.physical_pan_deg, actuator.physical_tilt_deg) == (90, 91)
 
-    actuator.apply(PTZCommand(20.0, 35.0, sequence=2))
-    assert (actuator.physical_pan_deg, actuator.physical_tilt_deg) == (20, 35)
+    minimum = (
+        int(serial.physical_pan_limits.minimum_deg),
+        int(serial.physical_tilt_limits.minimum_deg),
+    )
+    maximum = (
+        int(serial.physical_pan_limits.maximum_deg),
+        int(serial.physical_tilt_limits.maximum_deg),
+    )
+    actuator.apply(PTZCommand(float(maximum[0]), float(maximum[1]), sequence=2))
+    assert (actuator.physical_pan_deg, actuator.physical_tilt_deg) == minimum
 
-    actuator.apply(PTZCommand(160.0, 145.0, sequence=3))
-    assert (actuator.physical_pan_deg, actuator.physical_tilt_deg) == (160, 145)
+    actuator.apply(PTZCommand(float(minimum[0]), float(minimum[1]), sequence=3))
+    assert (actuator.physical_pan_deg, actuator.physical_tilt_deg) == maximum
 
 
 def test_handshake_and_disable_sequence_wraparound() -> None:

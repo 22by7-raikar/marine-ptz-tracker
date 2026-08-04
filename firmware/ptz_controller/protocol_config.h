@@ -3,16 +3,16 @@
 
 #include <stdint.h>
 
-// Candidate bench values. Confirm pins, directions, limits, and neutral angles
-// against the delivered mechanism before attaching powered servos.
+// Controlled physical operation verified the 75..105 envelope. Revalidate it
+// after mechanical changes; any expansion requires separate guided evidence.
 constexpr uint8_t PAN_SERVO_PIN = 9;
 constexpr uint8_t TILT_SERVO_PIN = 10;
 constexpr uint32_t SERIAL_BAUD_RATE = 115200UL;
 
-constexpr int PAN_MIN_DEG = 20;
-constexpr int PAN_MAX_DEG = 160;
-constexpr int TILT_MIN_DEG = 35;
-constexpr int TILT_MAX_DEG = 145;
+constexpr int PAN_MIN_DEG = 75;
+constexpr int PAN_MAX_DEG = 105;
+constexpr int TILT_MIN_DEG = 75;
+constexpr int TILT_MAX_DEG = 105;
 constexpr int PAN_NEUTRAL_DEG = 90;
 constexpr int TILT_NEUTRAL_DEG = 90;
 

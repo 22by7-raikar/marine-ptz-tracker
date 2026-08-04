@@ -8,10 +8,10 @@
 
 | Device | Connection | Notes |
 | --- | --- | --- |
-| InnoMaker U20CAM-1080P | Ubuntu laptop USB | Verify the discovered `/dev/video*` device before use. |
-| Arduino Uno R3 | Ubuntu laptop USB | Record its stable `/dev/serial/by-id/...` identity after verification; do not hard-code or guess a `/dev/tty*` path. |
-| Pan servo | Candidate Arduino digital pin 9 | Signal only; final pin and direction require bench confirmation. |
-| Tilt servo | Candidate Arduino digital pin 10 | Signal only; final pin and direction require bench confirmation. |
+| InnoMaker U20CAM-1080P | Ubuntu laptop USB | Use the configured `/dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-1080p-S1_SN0001-video-index0` path. |
+| Arduino Uno R3 | Ubuntu laptop USB | No serial by-id link was present at verification; use the recorded `/dev/ttyACM0` fallback and recheck it after USB changes. |
+| Pan servo | Arduino digital pin 9 | Signal only; loaded controlled movement passed within the frozen 75–105 degree envelope. |
+| Tilt servo | Arduino digital pin 10 | Signal only; loaded controlled movement passed within the frozen 75–105 degree envelope; 95 moves up and 85 moves down. |
 | Both SG90s | External regulated 5 V / 3 A supply | Supply positive to servo V+, negative to servo ground. |
 | Arduino ground | External supply ground | A common ground is required for servo signal reference. |
 
@@ -32,9 +32,9 @@ their grounds must be common. Verify the final supply current capacity against
 the delivered servo specifications and measured stall behavior rather than
 assuming the candidate 5 V / 3 A supply is sufficient.
 
-`/dev/serial/by-id/<verified-uno>` is a documentation/configuration template,
-not a device identity. Replace it with the exact discovered path before any
-armed run.
+No `/dev/serial/by-id` Uno link was available at the current host check, so
+`/dev/ttyACM0` is the verified configured fallback. Recheck it after USB
+changes; do not implement auto-discovery.
 
 Keep servo power wiring short and suitably sized. If the assembly behaves
 erratically, remove power and investigate supply capacity, ground continuity,

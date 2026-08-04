@@ -100,11 +100,17 @@ class OpenCVSource:
             self.close()
             kind = "camera" if self._is_live else "media"
             raise SourceOpenError(f"unable to open {kind} source {self._source!r}")
-        self._frame_count = (
-            None if self._is_live else self._capture_metric("CAP_PROP_FRAME_COUNT")
-        )
+        self._frame_count = None if self._is_live else self._capture_metric("CAP_PROP_FRAME_COUNT")
         if self._frame_count is not None and self._frame_count <= 0:
             self._frame_count = None
+        self._fps = None if self._is_image else self._capture_metric("CAP_PROP_FPS")
+        if self._fps is not None and self._fps <= 0.0:
+            self._fps = None
+        if not self._is_live and not self._is_image and self._fps is None:
+            self.close()
+            raise SourceOpenError(
+                f"video source {self._source!r} did not report a valid positive FPS"
+            )
 
     @property
     def cv2(self) -> Any:
@@ -126,6 +132,11 @@ class OpenCVSource:
         if self._frame_count is None or not self._frame_count.is_integer():
             return None
         return int(self._frame_count)
+
+    @property
+    def fps(self) -> float | None:
+        """Return validated declared FPS, when meaningful for the source."""
+        return self._fps
 
     def read(self) -> Frame | None:
         if self._closed:
@@ -211,12 +222,8 @@ class OpenCVSource:
         position = self._capture_metric("CAP_PROP_POS_FRAMES")
         verified_eof = False
         if self._frame_count is not None:
-            verified_eof = (
-                self._successful_reads >= self._frame_count
-                or (
-                    position is not None
-                    and position >= max(0.0, self._frame_count - 0.5)
-                )
+            verified_eof = self._successful_reads >= self._frame_count or (
+                position is not None and position >= max(0.0, self._frame_count - 0.5)
             )
         elif self._is_image and self._successful_reads == 1:
             verified_eof = True
@@ -253,14 +260,8 @@ def _image_dimensions(image: object) -> tuple[int, int]:
         raise ImageDimensionError("OpenCV frame dimensions must be positive integers")
     if len(shape) == 3:
         channels = shape[2]
-        if (
-            isinstance(channels, bool)
-            or not isinstance(channels, int)
-            or channels not in {1, 3, 4}
-        ):
-            raise ImageDimensionError(
-                "OpenCV frame channels must be one of 1, 3, or 4"
-            )
+        if isinstance(channels, bool) or not isinstance(channels, int) or channels not in {1, 3, 4}:
+            raise ImageDimensionError("OpenCV frame channels must be one of 1, 3, or 4")
     return height, width
 
 

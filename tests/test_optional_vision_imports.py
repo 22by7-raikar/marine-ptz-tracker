@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import subprocess
 import sys
-
+from pathlib import Path
 
 OPTIONAL_ROOTS = ("numpy", "cv2", "torch", "torchvision", "ultralytics", "serial")
 
@@ -36,6 +35,7 @@ import marine_ptz
 import marine_ptz.benchmark
 import marine_ptz.replay
 import marine_ptz.replay_cli
+import marine_ptz.runtime_benchmark
 import marine_ptz.vision_cli
 assert not (set(optional) & set(sys.modules)), sorted(set(optional) & set(sys.modules))
 from marine_ptz.demo import main
@@ -102,6 +102,29 @@ except SerialDependencyError as exc:
     assert "optional hardware dependencies" in str(exc)
 else:
     raise AssertionError("PySerialTransport did not report its missing dependency")
+"""
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_dataset_tools_do_not_import_or_access_optional_runtime_dependencies() -> None:
+    optional_names = repr(OPTIONAL_ROOTS)
+    result = _run_subprocess(
+        f"""
+import runpy
+import sys
+optional = {optional_names}
+for tool in (
+    "tools/record_dataset.py",
+    "tools/extract_frames.py",
+    "tools/prepare_tugboat_dataset.py",
+    "tools/import_ultralytics_ndjson.py",
+    "tools/train_tugboat.py",
+    "tools/evaluate_tugboat.py",
+):
+    runpy.run_path(tool)
+assert not (set(optional) & set(sys.modules)), sorted(set(optional) & set(sys.modules))
 """
     )
 

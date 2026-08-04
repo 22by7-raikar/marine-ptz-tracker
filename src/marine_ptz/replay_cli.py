@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
-from pathlib import Path
 import signal
 import sys
+from collections.abc import Sequence
+from pathlib import Path
 
 from .benchmark import environment_metadata
 from .config import ConfigError, load_config
@@ -14,7 +14,6 @@ from .opencv_source import OpenCVSourceError
 from .replay import AcceptanceThresholds, ReplayCancelled, ReplayError, ReplayOptions, run_replay
 from .vision_cli import _target_classes, _termination_signals
 from .yolo_detector import InferenceDeviceError, UltralyticsDetectorError
-
 
 ACCEPTANCE_FAILURE_STATUS = 3
 
@@ -42,9 +41,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             iou_threshold=args.iou if args.iou is not None else config.detection.iou_threshold,
             image_size=(
-                args.image_size
-                if args.image_size is not None
-                else config.detection.image_size
+                args.image_size if args.image_size is not None else config.detection.image_size
             ),
             max_frames=args.max_frames,
             report_path=args.report,

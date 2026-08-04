@@ -2,26 +2,25 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 import math
-from numbers import Real
 import time
+from collections.abc import Callable
+from numbers import Real
 
 from .cancellation import OperationCancelled
 from .config import SerialConfig
 from .serial_protocol import (
+    MAX_FRAME_LENGTH,
+    MIN_SEQUENCE,
+    PROTOCOL_VERSION,
     AckResponse,
     CenterCommand,
     DisableCommand,
     EnableCommand,
     ErrorCode,
     ErrorResponse,
-    FirmwareResponse,
     HelloCommand,
     HostCommand,
-    MAX_FRAME_LENGTH,
-    MIN_SEQUENCE,
-    PROTOCOL_VERSION,
     ProtocolError,
     ReadyResponse,
     SetCommand,
@@ -38,7 +37,6 @@ from .serial_transport import (
     SerialTransportError,
 )
 from .types import AngleLimits, PTZCommand
-
 
 MAX_UNRELATED_RESPONSES = 8
 
@@ -202,9 +200,7 @@ class ArduinoSerialActuator:
             # fresh READY 0 emitted during the bounded boot grace remains valid.
             transport.reset_input_buffer()
             opened_at = self._monotonic()
-            startup_deadline = (
-                opened_at + self._settings.handshake_timeout_seconds
-            )
+            startup_deadline = opened_at + self._settings.handshake_timeout_seconds
             if bool(getattr(transport, "may_reset_on_open", False)):
                 self._sleep_until(
                     min(
@@ -377,8 +373,7 @@ class ArduinoSerialActuator:
             attempt_start = self._monotonic()
             attempt_deadline = min(
                 deadline,
-                attempt_start
-                + self._settings.handshake_retry_interval_seconds,
+                attempt_start + self._settings.handshake_retry_interval_seconds,
             )
             try:
                 transport.write(encoded)
@@ -483,11 +478,16 @@ class ArduinoSerialActuator:
                         break
                     if isinstance(response, ErrorResponse):
                         if response.sequence in {0, command.sequence}:
+                            detail = ""
                             if response.error_code is ErrorCode.NOT_ENABLED:
                                 self._enabled = False
+                                detail = (
+                                    " (firmware watchdog may have expired before "
+                                    "the command was refreshed)"
+                                )
                             raise SerialActuatorProtocolError(
                                 f"firmware rejected sequence {command.sequence}: "
-                                f"{response.error_code.value}"
+                                f"{response.error_code.value}{detail}"
                             )
                         continue
                     if isinstance(response, ReadyResponse):
@@ -539,8 +539,7 @@ class ArduinoSerialActuator:
             sequence = self._take_sequence()
             ready = self._handshake(
                 sequence,
-                self._monotonic()
-                + self._settings.handshake_timeout_seconds,
+                self._monotonic() + self._settings.handshake_timeout_seconds,
             )
             if ready.protocol_version != PROTOCOL_VERSION:
                 return
@@ -557,13 +556,9 @@ class ArduinoSerialActuator:
         except ValueError as exc:
             raise SerialActuatorProtocolError(str(exc)) from exc
         if response.enabled and response.watchdog_state is not WatchdogState.ARMED:
-            raise SerialActuatorProtocolError(
-                "enabled STATUS must report an ARMED watchdog"
-            )
+            raise SerialActuatorProtocolError("enabled STATUS must report an ARMED watchdog")
         if not response.enabled and response.watchdog_state is WatchdogState.ARMED:
-            raise SerialActuatorProtocolError(
-                "disabled STATUS cannot report an ARMED watchdog"
-            )
+            raise SerialActuatorProtocolError("disabled STATUS cannot report an ARMED watchdog")
         logical_pan = _unmap_degree(
             response.pan_deg,
             self._settings.pan_direction,
@@ -575,13 +570,9 @@ class ArduinoSerialActuator:
             self._settings.tilt_offset_deg,
         )
         if not self._pan_limits.contains(logical_pan):
-            raise SerialActuatorProtocolError(
-                "STATUS pan angle maps outside logical pan limits"
-            )
+            raise SerialActuatorProtocolError("STATUS pan angle maps outside logical pan limits")
         if not self._tilt_limits.contains(logical_tilt):
-            raise SerialActuatorProtocolError(
-                "STATUS tilt angle maps outside logical tilt limits"
-            )
+            raise SerialActuatorProtocolError("STATUS tilt angle maps outside logical tilt limits")
         return logical_pan, logical_tilt
 
     def _validate_neutral_ack(self, response: AckResponse, command: str) -> None:
@@ -655,9 +646,7 @@ class ArduinoSerialActuator:
 
     def _raise_if_cancelled(self) -> None:
         if self._cancellation_requested():
-            raise OperationCancelled(
-                "serial motion dispatch cancelled before transport submission"
-            )
+            raise OperationCancelled("serial motion dispatch cancelled before transport submission")
 
     def _sleep_until(self, deadline: float) -> None:
         remaining = deadline - self._monotonic()

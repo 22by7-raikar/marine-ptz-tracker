@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum
-import re
 from typing import TypeAlias
-
 
 PROTOCOL_VERSION = "1"
 MAX_FRAME_LENGTH = 63
@@ -129,12 +128,7 @@ class StatusCommand:
 
 
 HostCommand: TypeAlias = (
-    HelloCommand
-    | SetCommand
-    | CenterCommand
-    | EnableCommand
-    | DisableCommand
-    | StatusCommand
+    HelloCommand | SetCommand | CenterCommand | EnableCommand | DisableCommand | StatusCommand
 )
 
 
@@ -275,9 +269,7 @@ def validate_sequence(sequence: object) -> int:
     if isinstance(sequence, bool) or not isinstance(sequence, int):
         raise SequenceValueError("sequence must be an integer")
     if not MIN_SEQUENCE <= sequence <= MAX_SEQUENCE:
-        raise SequenceValueError(
-            f"sequence must be between {MIN_SEQUENCE} and {MAX_SEQUENCE}"
-        )
+        raise SequenceValueError(f"sequence must be between {MIN_SEQUENCE} and {MAX_SEQUENCE}")
     return sequence
 
 
@@ -285,9 +277,7 @@ def validate_error_sequence(sequence: object) -> int:
     if isinstance(sequence, bool) or not isinstance(sequence, int):
         raise SequenceValueError("error sequence must be an integer")
     if not 0 <= sequence <= MAX_SEQUENCE:
-        raise SequenceValueError(
-            f"error sequence must be between 0 and {MAX_SEQUENCE}"
-        )
+        raise SequenceValueError(f"error sequence must be between 0 and {MAX_SEQUENCE}")
     return sequence
 
 
@@ -301,8 +291,7 @@ def validate_protocol_degree(value: object, field_name: str) -> int:
         raise DegreeValueError(f"{field_name} must be an integer number of degrees")
     if not MIN_PROTOCOL_DEGREES <= value <= MAX_PROTOCOL_DEGREES:
         raise DegreeValueError(
-            f"{field_name} must be between {MIN_PROTOCOL_DEGREES} "
-            f"and {MAX_PROTOCOL_DEGREES}"
+            f"{field_name} must be between {MIN_PROTOCOL_DEGREES} and {MAX_PROTOCOL_DEGREES}"
         )
     return value
 
@@ -327,15 +316,9 @@ def encode_command(command: HostCommand) -> bytes:
 
 def encode_response(response: FirmwareResponse) -> bytes:
     if isinstance(response, ReadyResponse):
-        text = (
-            f"READY {response.sequence} "
-            f"{response.protocol_version} {response.firmware_version}"
-        )
+        text = f"READY {response.sequence} {response.protocol_version} {response.firmware_version}"
     elif isinstance(response, AckResponse):
-        text = (
-            f"ACK {response.sequence} {response.command} "
-            f"{response.pan_deg} {response.tilt_deg}"
-        )
+        text = f"ACK {response.sequence} {response.command} {response.pan_deg} {response.tilt_deg}"
     elif isinstance(response, StatusResponse):
         text = (
             f"STATUS {response.sequence} {int(response.enabled)} "
@@ -344,9 +327,7 @@ def encode_response(response: FirmwareResponse) -> bytes:
     elif isinstance(response, ErrorResponse):
         text = f"ERR {response.sequence} {response.error_code.value}"
     else:
-        raise TypeError(
-            f"unsupported firmware response type: {type(response).__name__}"
-        )
+        raise TypeError(f"unsupported firmware response type: {type(response).__name__}")
     return _encode_line(text, b"\r\n")
 
 
@@ -406,9 +387,7 @@ def parse_response(frame: bytes | str) -> FirmwareResponse:
         try:
             watchdog = WatchdogState(tokens[5])
         except ValueError as exc:
-            raise MalformedFrameError(
-                f"unsupported watchdog state {tokens[5]!r}"
-            ) from exc
+            raise MalformedFrameError(f"unsupported watchdog state {tokens[5]!r}") from exc
         return StatusResponse(
             _parsed_sequence(tokens[1]),
             bool(enabled_value),
@@ -471,9 +450,7 @@ def _parse_integer(token: str, field_name: str) -> int:
         raise IntegerValueError(f"{field_name} must be a canonical integer")
     value = int(token)
     if not MIN_WIRE_INTEGER <= value <= MAX_WIRE_INTEGER:
-        raise IntegerValueError(
-            f"{field_name} must fit the signed 32-bit wire integer domain"
-        )
+        raise IntegerValueError(f"{field_name} must fit the signed 32-bit wire integer domain")
     return value
 
 
@@ -492,9 +469,7 @@ def _parsed_degree(token: str, field_name: str) -> int:
 def _require_token_count(tokens: list[str], expected: int) -> None:
     if len(tokens) != expected or any(not token for token in tokens):
         name = tokens[0] if tokens and tokens[0] else "message"
-        raise TokenCountError(
-            f"{name} requires exactly {expected} non-empty tokens"
-        )
+        raise TokenCountError(f"{name} requires exactly {expected} non-empty tokens")
 
 
 def _validate_version(value: object, field_name: str) -> None:

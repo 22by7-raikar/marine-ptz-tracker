@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import replace
 import signal
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -30,11 +30,10 @@ from marine_ptz.vision_cli import (
     RuntimeCleanupError,
     UnexpectedCancellationError,
     VisionOptions,
-    _RuntimeResources,
     _build_actuator,
+    _RuntimeResources,
     run_vision,
 )
-
 
 pytestmark = pytest.mark.integration
 
@@ -247,9 +246,7 @@ def production_actuator(
 
 def test_complete_target_and_lost_target_paths_apply_commands() -> None:
     source = FakeSource([make_frame(0), make_frame(1), None])
-    detector = FakeDetector(
-        [(Detection("boat", 0.9, 70, 70, 90, 90),), ()]
-    )
+    detector = FakeDetector([(Detection("boat", 0.9, 70, 70, 90, 90),), ()])
     actuator = FakeActuator()
     telemetry: list[str] = []
 
@@ -390,7 +387,7 @@ def test_model_initialization_failure_closes_source_before_actuator_exists() -> 
     assert actuator_constructed is False
 
 
-def test_hardware_startup_and_normal_eof_use_safe_order() -> None:
+def test_pre_enable_eof_never_constructs_or_enables_actuator() -> None:
     events: list[str] = []
     source = FakeSource([None], events)
     detector = FakeDetector([], events)
@@ -403,10 +400,8 @@ def test_hardware_startup_and_normal_eof_use_safe_order() -> None:
             arm_hardware=True,
         ),
         source_factory=lambda _source: events.append("source:init") or source,
-        detector_factory=lambda *_args, **_kwargs: events.append("model:init")
-        or detector,
-        actuator_factory=lambda _config, _options: events.append("actuator:init")
-        or actuator,
+        detector_factory=lambda *_args, **_kwargs: events.append("model:init") or detector,
+        actuator_factory=lambda _config, _options: events.append("actuator:init") or actuator,
         emit=lambda _line: None,
     )
 
@@ -414,16 +409,203 @@ def test_hardware_startup_and_normal_eof_use_safe_order() -> None:
     assert events == [
         "source:init",
         "model:init",
-        "actuator:init",
-        "actuator:open",
-        "actuator:enable",
-        "actuator:disable",
-        "actuator:close",
         "source:close",
     ]
 
 
-def test_camera_read_failure_after_enable_stops_before_motion() -> None:
+def test_slow_warmup_precedes_enable_and_no_target_refreshes_watchdog() -> None:
+    config = load_config("configs/hardware.yaml")
+    assert config.serial is not None
+    assert config.tracking.update_rate_hz == config.serial.command_rate_hz == 10.0
+    now = [0.0]
+    events: list[str] = []
+    firmware = production_firmware(config, clock=lambda: now[0])
+    command_times: list[tuple[object, float]] = []
+
+    def responder(frame: bytes) -> tuple[bytes, ...]:
+        command = parse_command(frame)
+        command_times.append((command, now[0]))
+        responses = firmware.handle_frame(frame)
+        if isinstance(command, HelloCommand):
+            return (firmware.startup_frame(), *responses)
+        return responses
+
+    transport = InMemorySerialTransport(responder)
+    actuator = production_actuator(
+        config,
+        transport,
+        monotonic=lambda: now[0],
+        sleep=lambda duration: now.__setitem__(0, now[0] + duration),
+    )
+    source = FakeSource([make_frame(0), make_frame(1), None], events)
+
+    class SlowFirstInferenceDetector(FakeDetector):
+        def detect(self, frame: Frame) -> tuple[Detection, ...]:
+            result = super().detect(frame)
+            if self.calls == 1:
+                now[0] += 1.25
+            return result
+
+    detector = SlowFirstInferenceDetector([(), ()], events)
+    telemetry: list[str] = []
+
+    processed = run_vision(
+        config,
+        make_options(
+            backend="arduino_serial",
+            arm_hardware=True,
+            serial_port="/dev/fake",
+        ),
+        source_factory=lambda _source: events.append("source:init") or source,
+        detector_factory=lambda *_args, **_kwargs: events.append("model:init") or detector,
+        actuator_factory=lambda _config, _options: events.append("actuator:init") or actuator,
+        rate_monotonic=lambda: now[0],
+        sleep=lambda duration: now.__setitem__(0, now[0] + duration),
+        emit=telemetry.append,
+    )
+
+    enable_time = next(
+        timestamp for command, timestamp in command_times if isinstance(command, EnableCommand)
+    )
+    set_commands = [
+        (command, timestamp)
+        for command, timestamp in command_times
+        if isinstance(command, SetCommand)
+    ]
+
+    assert processed == 2
+    assert events[:4] == ["source:init", "model:init", "detect:0", "actuator:init"]
+    assert enable_time == pytest.approx(1.25)
+    assert set_commands[0][1] - enable_time == pytest.approx(0.0)
+    assert [timestamp for _, timestamp in set_commands] == pytest.approx([1.25, 1.35, 1.45])
+    assert [(command.pan_deg, command.tilt_deg) for command, _ in set_commands] == [
+        (90, 90),
+        (90, 90),
+        (90, 90),
+    ]
+    assert all(
+        config.actuator.pan_limits.contains(command.pan_deg)
+        and config.actuator.tilt_limits.contains(command.tilt_deg)
+        for command, _ in set_commands
+    )
+    assert telemetry[:3] == [
+        "initialization complete: camera validated, model warm-up complete, display/output ready",
+        "actuator handshake complete; sending ENABLE",
+        "sending first hold SET pan=90.00 tilt=90.00",
+    ]
+    assert firmware.enabled is False
+    assert actuator.closed is True
+    assert source.close_count == 1
+
+
+def test_display_initialization_occurs_before_actuator_enable() -> None:
+    events: list[str] = []
+
+    class FakeDisplay:
+        FONT_HERSHEY_SIMPLEX = 0
+        LINE_AA = 0
+        MARKER_CROSS = 0
+
+        def namedWindow(self, _name: str) -> None:
+            events.append("display:init")
+
+        def rectangle(self, *_args: object) -> None:
+            pass
+
+        def putText(self, *_args: object) -> None:
+            pass
+
+        def drawMarker(self, *_args: object) -> None:
+            pass
+
+        def line(self, *_args: object) -> None:
+            pass
+
+        def imshow(self, *_args: object) -> None:
+            pass
+
+        def waitKey(self, _delay: int) -> int:
+            return -1
+
+        def destroyAllWindows(self) -> None:
+            events.append("display:close")
+
+    source = FakeSource([make_frame(0)], events)
+    source.cv2 = FakeDisplay()
+    detector = FakeDetector([()], events)
+    actuator = FakeActuator(events)
+
+    processed = run_vision(
+        load_config("configs/hardware.yaml"),
+        replace(
+            make_options(
+                backend="arduino_serial",
+                arm_hardware=True,
+                serial_port="/dev/fake",
+                max_frames=1,
+            ),
+            display=True,
+        ),
+        source_factory=lambda _source: events.append("source:init") or source,
+        detector_factory=lambda *_args, **_kwargs: events.append("model:init") or detector,
+        actuator_factory=lambda _config, _options: events.append("actuator:init") or actuator,
+        rate_monotonic=lambda: 10.0,
+        sleep=lambda _duration: None,
+        emit=lambda _line: None,
+    )
+
+    assert processed == 1
+    assert events[:7] == [
+        "source:init",
+        "model:init",
+        "detect:0",
+        "display:init",
+        "actuator:init",
+        "actuator:open",
+        "actuator:enable",
+    ]
+    assert events[-4:] == [
+        "actuator:disable",
+        "actuator:close",
+        "source:close",
+        "display:close",
+    ]
+
+
+def test_detected_target_then_lost_hold_refreshes_same_bounded_position() -> None:
+    config = load_config("configs/hardware.yaml")
+    source = FakeSource([make_frame(0), make_frame(1), None])
+    detector = FakeDetector(
+        [
+            (Detection("boat", 0.9, 70, 40, 90, 60),),
+            (),
+        ]
+    )
+    actuator = FakeActuator()
+
+    processed = run_fake(
+        config,
+        make_options(
+            backend="arduino_serial",
+            arm_hardware=True,
+            serial_port="/dev/fake",
+        ),
+        source,
+        detector,
+        actuator,
+    )
+
+    positions = [(command.pan_deg, command.tilt_deg) for command in actuator.applied]
+    assert processed == 2
+    assert positions == [(90.0, 90.0), (93.0, 90.0), (93.0, 90.0)]
+    assert all(
+        config.actuator.pan_limits.contains(pan) and config.actuator.tilt_limits.contains(tilt)
+        for pan, tilt in positions
+    )
+    assert actuator.disable_count == actuator.close_count == source.close_count == 1
+
+
+def test_initial_camera_read_failure_occurs_before_actuator_enable() -> None:
     events: list[str] = []
     source = FakeSource([RuntimeError("camera read failed")], events)
     actuator = FakeActuator(events)
@@ -442,11 +624,7 @@ def test_camera_read_failure_after_enable_stops_before_motion() -> None:
         )
 
     assert actuator.applied == []
-    assert events[-3:] == [
-        "actuator:disable",
-        "actuator:close",
-        "source:close",
-    ]
+    assert events == ["source:close"]
 
 
 def test_max_frame_completion_closes_without_reading_an_extra_frame() -> None:
@@ -523,6 +701,7 @@ def test_termination_requested_during_open_never_enables_and_cleans_once() -> No
 
     assert processed == 0
     assert events == [
+        "detect:0",
         "actuator:open",
         "actuator:disable",
         "actuator:close",
@@ -580,7 +759,8 @@ def test_termination_during_detector_inference_prevents_apply() -> None:
 
     assert processed == 0
     assert actuator.applied == []
-    assert actuator.disable_count == actuator.close_count == source.close_count == 1
+    assert actuator.disable_count == actuator.close_count == 0
+    assert source.close_count == 1
 
 
 def test_unexpected_detector_cancellation_fails_and_cleans_up_once() -> None:
@@ -605,7 +785,8 @@ def test_unexpected_detector_cancellation_fails_and_cleans_up_once() -> None:
     assert isinstance(captured.value.__cause__, OperationCancelled)
     assert str(captured.value.__cause__) == "detector cancelled"
     assert actuator.applied == []
-    assert actuator.disable_count == actuator.close_count == source.close_count == 1
+    assert actuator.disable_count == actuator.close_count == 0
+    assert source.close_count == 1
 
 
 def test_unexpected_actuator_cancellation_fails_and_cleans_up_once() -> None:
@@ -673,7 +854,8 @@ def test_termination_during_selection_prevents_controller_and_apply(
 
     assert processed == 0
     assert actuator.applied == []
-    assert actuator.disable_count == actuator.close_count == source.close_count == 1
+    assert actuator.disable_count == actuator.close_count == 0
+    assert source.close_count == 1
 
 
 def test_termination_after_control_calculation_prevents_dispatch(
@@ -735,7 +917,7 @@ def test_signal_handler_only_records_termination_state(
 
 def test_serial_handshake_failure_never_enables_and_closes_everything() -> None:
     events: list[str] = []
-    source = FakeSource([None], events)
+    source = FakeSource([make_frame(0)], events)
     actuator = FakeActuator(events, open_error=RuntimeError("handshake failed"))
 
     with pytest.raises(RuntimeError, match="handshake failed"):
@@ -747,7 +929,7 @@ def test_serial_handshake_failure_never_enables_and_closes_everything() -> None:
                 serial_port="/dev/fake",
             ),
             source,
-            FakeDetector([], events),
+            FakeDetector([()], events),
             actuator,
         )
 
@@ -760,12 +942,12 @@ def test_serial_handshake_failure_never_enables_and_closes_everything() -> None:
     "failure",
     [RuntimeError("detector failed"), KeyboardInterrupt()],
 )
-def test_detector_failure_after_enable_disables_and_closes(
+def test_steady_state_detector_failure_after_enable_disables_and_closes(
     failure: BaseException,
 ) -> None:
     events: list[str] = []
-    source = FakeSource([make_frame(0)], events)
-    detector = FakeDetector([failure], events)
+    source = FakeSource([make_frame(0), make_frame(1)], events)
+    detector = FakeDetector([(), failure], events)
     actuator = FakeActuator(events)
 
     with pytest.raises(type(failure)):
@@ -781,7 +963,7 @@ def test_detector_failure_after_enable_disables_and_closes(
             actuator,
         )
 
-    assert actuator.applied == []
+    assert len(actuator.applied) == 2
     assert events[-3:] == [
         "actuator:disable",
         "actuator:close",
@@ -814,7 +996,7 @@ def test_protocol_fault_stops_all_later_motion_and_cleans_up() -> None:
         )
 
     assert len(actuator.applied) == 2
-    assert detector.calls == 2
+    assert detector.calls == 1
     assert actuator.disable_count == 1
     assert actuator.close_count == 1
     assert source.close_count == 1
@@ -954,7 +1136,7 @@ def test_runtime_composes_real_arduino_actuator_with_firmware_model() -> None:
     assert isinstance(commands[3], SetCommand)
     assert isinstance(commands[-1], DisableCommand)
     assert [command.sequence for command in commands[:4]] == [1, 2, 3, 4]
-    assert (firmware.pan_deg, firmware.tilt_deg) == (93, 93)
+    assert (firmware.pan_deg, firmware.tilt_deg) == (87, 87)
     assert firmware.enabled is False
     assert actuator.closed is True
 
@@ -1071,7 +1253,7 @@ def test_runtime_set_ack_loss_stops_later_motion_and_preserves_confirmed_state()
     assert len({command.sequence for command in set_commands}) == 1
     assert (actuator.pan_deg, actuator.tilt_deg) == (90.0, 90.0)
     assert actuator.position_uncertain is True
-    assert (firmware.pan_deg, firmware.tilt_deg) == (93, 93)
+    assert (firmware.pan_deg, firmware.tilt_deg) == (90, 90)
     assert firmware.enabled is True
     firmware.tick()
     assert firmware.enabled is False
@@ -1165,10 +1347,7 @@ def test_runtime_handshake_failure_never_enables_firmware() -> None:
         )
 
     assert firmware.enabled is False
-    assert all(
-        not isinstance(parse_command(frame), EnableCommand)
-        for frame in transport.writes
-    )
+    assert all(not isinstance(parse_command(frame), EnableCommand) for frame in transport.writes)
 
 
 def test_runtime_cancellation_during_real_actuator_rate_wait_writes_no_second_set() -> None:
@@ -1217,8 +1396,8 @@ def test_runtime_cancellation_during_real_actuator_rate_wait_writes_no_second_se
         for frame in transport.writes
         if isinstance(parse_command(frame), SetCommand)
     ]
-    assert processed == 1
-    assert source.read_count == detector.calls == 2
+    assert processed == 0
+    assert source.read_count == detector.calls == 1
     assert len(set_commands) == 1
-    assert (firmware.pan_deg, firmware.tilt_deg) == (93, 93)
+    assert (firmware.pan_deg, firmware.tilt_deg) == (90, 90)
     assert firmware.enabled is False

@@ -1,15 +1,15 @@
 # Presentation outline
 
-This 12-slide outline keeps software evidence, toolchain evidence, and pending
-physical evidence visibly separate. Replace every `<fill>` item only with
-captured evidence from the checklist.
+This 12-slide outline keeps measured, observed, software-tested, and still
+unmeasured claims visibly separate. Cross-check every artifact against the
+submission checklist before presenting it.
 
 ## 1. Challenge and requirements
 
 - **Key points:** Track a small marine target; laptop performs perception/control; Uno is the narrow servo boundary; safety and evidence gates precede physical claims.
 - **Visual:** One-sentence system goal beside a staged validation ladder.
 - **Evidence/source:** [README](../README.md), [acceptance criteria](acceptance_criteria.md).
-- **Speaker note:** Lead with the distinction between implemented software and pending physical proof.
+- **Speaker note:** Lead with the working controlled demonstration, then state the non-production limitations.
 
 ## 2. Hardware, BOM, and budget
 
@@ -27,8 +27,8 @@ captured evidence from the checklist.
 
 ## 4. Perception pipeline
 
-- **Key points:** OpenCV and Ultralytics are optional/lazy; configured target classes are normalized; local model path avoids downloads; full fixed-FOV image is used.
-- **Visual:** One annotated replay frame placeholder labeled `<fill after replay>`.
+- **Key points:** OpenCV and Ultralytics are optional/lazy; the frozen class is `marine_target`; full-frame pixels drive inference/control; automatic digital zoom is display/output only.
+- **Visual:** One reviewed annotated frame from the final presentation copy.
 - **Evidence/source:** [README](../README.md), [replay methodology](replay.md), [BOM zoom scope](bom.md).
 - **Speaker note:** Do not call boxes/crops optical zoom.
 
@@ -51,39 +51,39 @@ captured evidence from the checklist.
 - **Key points:** Hardware-free fakes cover runtime/serial/firmware parity; CI excludes hardware/GPU; import isolation prevents accidental camera/model/serial access; physical stages have their own evidence checklist.
 - **Visual:** Test pyramid with software, AVR compile, and physical-evidence layers.
 - **Evidence/source:** [test plan](test_plan.md), [acceptance criteria](acceptance_criteria.md).
-- **Speaker note:** Current count is **540** hardware/GPU-independent tests; update only after a new validation run.
+- **Speaker note:** Quote the final validation transcript rather than a stale hard-coded test count.
 
 ## 8. GPU and firmware benchmarks
 
-- **Key points:** Blank 640×640 model-only warm inference: mean 6.65 ms, median 6.56 ms, p95 6.96 ms, about 150 FPS; Uno: 8,120 flash bytes (25%), 715 static RAM bytes (34%); Python 3.10/3.11 and remote Uno compile passed.
-- **Visual:** Two-column benchmark table with a bold “not camera-to-servo” label.
+- **Key points:** Held-out positive run: 1.7 ms preprocess, 7.4 ms GPU inference, 1.0 ms postprocess; integrated loop about 9.4 unique FPS; actuator about 10 Hz; camera capability 1920×1080 MJPEG 30 FPS; Uno: 8,120 flash bytes (25%), 715 static RAM bytes (34%).
+- **Visual:** Layered timing table with a bold “component timings are not integrated latency” label.
 - **Evidence/source:** [benchmarks](benchmarks.md), [test plan](test_plan.md), firmware CI.
 - **Speaker note:** Do not infer end-to-end latency from the blank-frame benchmark.
 
-## 9. Hardware calibration results (placeholder)
+## 9. Hardware calibration results
 
-- **Key points:** Servo identity, pin, direction, neutral, safe min/max, clearance, current, and supply observations remain `<fill>`; camera formats/FPS remain `<fill>`.
-- **Visual:** Empty-but-labeled pan/tilt calibration table.
+- **Key points:** Both mappings are `physical = -logical + 180`; neutral is 90/90; verified logical/physical limits are 75–105; external 5 V servo supply and common ground remain mandatory.
+- **Visual:** Completed pan/tilt mapping and limit table beside the wiring evidence.
 - **Evidence/source:** [demo runbook](demo_runbook.md), [evidence checklist](evidence_checklist.md).
-- **Speaker note:** Say “pending,” never “passed,” until captured and reviewed.
+- **Speaker note:** Do not turn working calibration into a safety-rating claim.
 
-## 10. End-to-end demonstration results (placeholder)
+## 10. End-to-end demonstration results
 
-- **Key points:** Requires reviewed camera/simulated run before arming; final video must show terminal, camera/annotation, telemetry, safety observer, lost target, and shutdown; results are `<fill>`.
-- **Visual:** Four-panel layout placeholder: terminal, camera, rig, telemetry.
+- **Key points:** V3 tracks the tugboat; pan/tilt/loss/reacquisition and digital zoom work; hand/forearm-only scenes were rejected live; original raw video has a known timebase defect and the presentation copy is corrected.
+- **Visual:** Four-panel evidence: terminal, annotated presentation copy, rig, and telemetry.
 - **Evidence/source:** [demo runbook](demo_runbook.md).
-- **Speaker note:** Explain startup ordering and explicit `/dev/serial/by-id/...` identity.
+- **Speaker note:** Explain startup ordering, explicit `/dev/ttyACM0` re-verification, and `--arm-hardware`.
 
 ## 11. Failure handling and limitations
 
-- **Key points:** Fail closed on serial setup; malformed responses fault host session; cleanup is bounded; supply polarity/ground/binding remain physical hazards; watchdog is fallback only.
+- **Key points:** Fail closed on serial setup; malformed responses fault host session; cleanup is bounded; supply polarity/ground/binding remain physical hazards; watchdog is fallback only; wallet OOD false positive reached about 0.50–0.77.
 - **Visual:** Highest-risk rows from the failure-mode table.
 - **Evidence/source:** [failure modes](failure_modes.md), [wiring](wiring.md).
 - **Speaker note:** Direct external servo-power removal is the operational emergency action.
 
-## 12. Next production steps
+## 12. Submission and future production work
 
-- **Key points:** Complete staged evidence; set reviewed media/hardware thresholds; validate camera-to-motion timing; complete soak tests; decide publication/licensing only after evidence review.
-- **Visual:** Stage 0–9 progress checklist with only software/AVR stages marked complete.
+- **Key points:** Verify ignored artifacts and defensible claims for submission; held-out negative FP rate remains unmeasured; longer soak, safety engineering, weatherization, broader data, and licensing are outside the challenge.
+- **Visual:** Final submission checklist with measured/observed/tested/unmeasured labels.
 - **Evidence/source:** [demo runbook](demo_runbook.md), [acceptance criteria](acceptance_criteria.md).
 - **Speaker note:** Close with the exact evidence needed to move each pending category forward.

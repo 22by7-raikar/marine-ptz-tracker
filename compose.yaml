@@ -1,0 +1,24 @@
+name: marine-ptz
+
+x-runtime-security: &runtime-security
+  init: true
+  read_only: true
+  network_mode: none
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=512m,uid=10001,gid=10001
+    - /run/marine-ptz-test-tmp:rw,exec,nosuid,nodev,size=128m,mode=0700,uid=10001,gid=10001
+
+services:
+  test:
+    <<: *runtime-security
+    image: "${MARINE_PTZ_TEST_IMAGE:-marine-ptz:test-local}"
+    pull_policy: never
+    build:
+      context: .
+      target: test
+    environment:
+      MARINE_PTZ_PREFLIGHT_MODE: test
+      TMPDIR: /run/marine-ptz-test-tmp

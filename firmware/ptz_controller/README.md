@@ -1,11 +1,11 @@
 # Arduino PTZ controller protocol
 
-This directory contains a compile-verified firmware foundation for an Arduino
-Uno R3-compatible controller and two hobby positional servos. The
-platform-neutral protocol core is compiled and executed by host CI, and the
-sketch compiles for the Uno, but it has not been uploaded or bench-tested.
-Candidate pins, directions, servo models, current draw, limits, and neutral
-positions require confirmation with the delivered hardware.
+This directory contains the compile-verified firmware for an Arduino Uno
+R3-compatible controller and two hobby positional servos. The platform-neutral
+protocol core is compiled and executed by host CI, the sketch compiles for the
+Uno, and upload, handshake, and bounded integrated movement have been observed
+on the delivered rig. This is not a qualification of exact servo models,
+current draw, watchdog-disconnect timing, long-duration behavior, or safety.
 
 ## Wire format
 
@@ -205,8 +205,10 @@ The pre-remediation result was 7,856 bytes of flash (24%) and 705 bytes of
 static RAM (34%). The current result, including the rejected-`SET` retry cache,
 is 8,120 bytes of flash (25%) and 715 bytes of static RAM (34%). Current
 warnings come only from the official AVR core's `new.cpp`; project sources
-produce no warnings. Remote CI has passed; firmware upload and physical
-verification remain pending.
+produce no warnings. Prior remote CI revisions passed; the final committed
+revision must use CI as the authoritative clean-environment result. Upload and
+controlled integrated movement have been observed, while watchdog-disconnect,
+electrical, mechanical-soak, and broader operating evidence remain pending.
 
 Servo power must come from the external regulated 5 V supply with a common
 Arduino ground. See [wiring](../../docs/wiring.md) before applying power.

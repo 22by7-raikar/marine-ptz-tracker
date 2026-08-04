@@ -2,6 +2,8 @@
 runtime:
   mode: development
   telemetry_enabled: true
+  execution_mode: single
+  result_freshness_s: 0.5
 
 camera:
   source: synthetic

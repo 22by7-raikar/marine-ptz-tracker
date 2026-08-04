@@ -28,11 +28,13 @@ class FakeCapture:
         opened: bool = True,
         frame_count: float | None = None,
         position: float | None = None,
+        fps: float | None = 30.0,
     ) -> None:
         self.reads = list(reads)
         self.opened = opened
         self.frame_count = frame_count
         self.position = position
+        self.fps = fps
         self.successful_reads = 0
         self.release_count = 0
 
@@ -52,6 +54,8 @@ class FakeCapture:
             return self.frame_count if self.frame_count is not None else 0.0
         if property_id == FakeCV2.CAP_PROP_POS_FRAMES:
             return self.position if self.position is not None else float(self.successful_reads)
+        if property_id == FakeCV2.CAP_PROP_FPS:
+            return self.fps if self.fps is not None else 0.0
         return 0.0
 
     def release(self) -> None:
@@ -61,6 +65,7 @@ class FakeCapture:
 class FakeCV2:
     CAP_PROP_FRAME_COUNT = 1
     CAP_PROP_POS_FRAMES = 2
+    CAP_PROP_FPS = 3
 
 
 @pytest.mark.parametrize(
@@ -92,6 +97,40 @@ def test_integer_source_is_camera_but_string_zero_is_path() -> None:
     assert camera.is_live is True
     assert path.is_live is False
     assert received == [0, "0"]
+
+
+def test_finite_video_exposes_validated_declared_fps() -> None:
+    source = OpenCVSource(
+        "video.mp4",
+        cv2_module=FakeCV2(),
+        capture_factory=lambda _value: FakeCapture([], fps=29.97),
+    )
+
+    assert source.fps == pytest.approx(29.97)
+
+
+@pytest.mark.parametrize("fps", [None, 0.0, -1.0, float("nan"), float("inf")])
+def test_finite_video_rejects_missing_or_invalid_fps(fps: float | None) -> None:
+    capture = FakeCapture([], fps=fps)
+
+    with pytest.raises(SourceOpenError, match="valid positive FPS"):
+        OpenCVSource(
+            "video.mp4",
+            cv2_module=FakeCV2(),
+            capture_factory=lambda _value: capture,
+        )
+
+    assert capture.release_count == 1
+
+
+def test_live_camera_does_not_require_declared_fps() -> None:
+    source = OpenCVSource(
+        0,
+        cv2_module=FakeCV2(),
+        capture_factory=lambda _value: FakeCapture([], fps=None),
+    )
+
+    assert source.fps is None
 
 
 def test_open_failure_releases_capture() -> None:

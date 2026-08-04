@@ -20,7 +20,6 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .yolo_detector import InferenceDeviceError, resolve_inference_device
 
-
 _ENVIRONMENT_METADATA_KEYS = frozenset(
     {
         "torch_version",
@@ -87,9 +86,7 @@ class BenchmarkConfig:
                 raise BenchmarkError(f"{name} must be a finite number between 0 and 1")
             if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0:
                 raise BenchmarkError(f"{name} must be a finite number between 0 and 1")
-        if isinstance(self.warmup_iterations, bool) or not isinstance(
-            self.warmup_iterations, int
-        ):
+        if isinstance(self.warmup_iterations, bool) or not isinstance(self.warmup_iterations, int):
             raise BenchmarkError("warmup_iterations must be a non-negative integer")
         if self.warmup_iterations < 0:
             raise BenchmarkError("warmup_iterations must be a non-negative integer")
@@ -316,12 +313,15 @@ def run_benchmark(
 
 def write_report(report: JsonReport, path: Path) -> None:
     """Atomically replace a report with strict JSON written on the same filesystem."""
-    serialized = json.dumps(
-        report.to_dict(),
-        allow_nan=False,
-        indent=2,
-        sort_keys=True,
-    ) + "\n"
+    serialized = (
+        json.dumps(
+            report.to_dict(),
+            allow_nan=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = -1
     temporary_path: Path | None = None
@@ -527,7 +527,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default="yolo11n.pt", help="Ultralytics model name or local path")
+    parser.add_argument(
+        "--model", default="yolo11n.pt", help="Ultralytics model name or local path"
+    )
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:N")
     parser.add_argument("--image-size", type=int, default=640)
     parser.add_argument("--confidence", type=float, default=0.25)
@@ -535,7 +537,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--warmup", type=int, default=5, help="unmeasured inference iterations")
     parser.add_argument("--iterations", type=int, default=30, help="measured inference iterations")
     parser.add_argument("--image", type=Path, help="optional local image instead of a blank frame")
-    parser.add_argument("--output", type=Path, help="JSON path; defaults under artifacts/benchmarks")
+    parser.add_argument(
+        "--output", type=Path, help="JSON path; defaults under artifacts/benchmarks"
+    )
     return parser
 
 
@@ -576,11 +580,7 @@ def environment_metadata(resolved_device: str) -> Mapping[str, object]:
 
 def allowlisted_environment_metadata(values: Mapping[str, object]) -> dict[str, object]:
     """Return only shareable package and GPU metadata for persisted reports."""
-    return {
-        name: values[name]
-        for name in sorted(_ENVIRONMENT_METADATA_KEYS)
-        if name in values
-    }
+    return {name: values[name] for name in sorted(_ENVIRONMENT_METADATA_KEYS) if name in values}
 
 
 def _write_serialized_report(stream: TextIO, serialized: str) -> None:
@@ -639,9 +639,7 @@ def _json_compatible(
         finally:
             active.remove(identity)
 
-    raise BenchmarkError(
-        f"{path} contains unsupported JSON value of type {type(value).__name__}"
-    )
+    raise BenchmarkError(f"{path} contains unsupported JSON value of type {type(value).__name__}")
 
 
 def _is_sensitive_name(name: str) -> bool:
@@ -663,14 +661,9 @@ def _sanitize_url(value: str) -> str:
 
     query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
     sanitized_query = urlencode(
-        [
-            (name, _REDACTED if _is_sensitive_name(name) else item)
-            for name, item in query_pairs
-        ]
+        [(name, _REDACTED if _is_sensitive_name(name) else item) for name, item in query_pairs]
     )
-    return urlunsplit(
-        (parsed.scheme, netloc, parsed.path, sanitized_query, parsed.fragment)
-    )
+    return urlunsplit((parsed.scheme, netloc, parsed.path, sanitized_query, parsed.fragment))
 
 
 def _optional_module(name: str) -> Any:
@@ -722,7 +715,11 @@ def _result_speeds(results: Sequence[Any]) -> list[Mapping[str, float]]:
         parsed: dict[str, float] = {}
         for name in ("preprocess", "inference", "postprocess"):
             value = raw.get(name)
-            if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            if (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(value)
+            ):
                 parsed[name] = float(value)
         if parsed:
             speeds.append(parsed)
@@ -739,8 +736,10 @@ def _mean_speeds(samples: Sequence[Mapping[str, float]]) -> dict[str, float]:
 
 def _image_resolution(image: object, fallback_size: int) -> tuple[int, int]:
     shape = getattr(image, "shape", None)
-    if isinstance(shape, tuple) and len(shape) >= 2 and all(
-        isinstance(value, int) and value > 0 for value in shape[:2]
+    if (
+        isinstance(shape, tuple)
+        and len(shape) >= 2
+        and all(isinstance(value, int) and value > 0 for value in shape[:2])
     ):
         return shape[1], shape[0]
     return fallback_size, fallback_size

@@ -1,0 +1,82 @@
+name: marine-ptz-replay
+
+x-runtime-security: &runtime-security
+  init: true
+  read_only: true
+  network_mode: none
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=512m,uid=10001,gid=10001
+
+services:
+  replay:
+    <<: *runtime-security
+    image: "${MARINE_PTZ_IMAGE:-marine-ptz:runtime-local}"
+    pull_policy: never
+    build:
+      context: .
+      target: runtime-headless
+    environment:
+      MARINE_PTZ_PREFLIGHT_MODE: replay
+      MARINE_PTZ_CONFIG: /run/marine-ptz/config.yaml
+      MARINE_PTZ_MODEL: /models/model.pt
+      MARINE_PTZ_INPUT_VIDEO: /inputs/input.mp4
+      MARINE_PTZ_OUTPUT_DIRECTORY: /artifacts
+      MARINE_PTZ_TARGET_CLASS: marine_target
+      MARINE_PTZ_CONFIDENCE: "0.60"
+      MARINE_PTZ_DEVICE: cuda:0
+      MARINE_PTZ_RUNTIME_MODE: concurrent
+      YOLO_CONFIG_DIR: /tmp/ultralytics
+      NVIDIA_VISIBLE_DEVICES: "${MARINE_PTZ_GPU_DEVICE:?set an explicit GPU device}"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    group_add:
+      - "${MARINE_PTZ_ARTIFACT_GID:?set the numeric GID owning the artifact directory}"
+    volumes:
+      - type: bind
+        source: "${MARINE_PTZ_CONFIG:?set an absolute configuration file path}"
+        target: /run/marine-ptz/config.yaml
+        read_only: true
+      - type: bind
+        source: "${MARINE_PTZ_MODEL:?set an absolute local model file path}"
+        target: /models/model.pt
+        read_only: true
+      - type: bind
+        source: "${MARINE_PTZ_INPUT_VIDEO:?set an absolute local video file path}"
+        target: /inputs/input.mp4
+        read_only: true
+      - type: bind
+        source: "${MARINE_PTZ_ARTIFACTS:?set an absolute existing artifact directory}"
+        target: /artifacts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command:
+      - python
+      - -m
+      - marine_ptz.vision_cli
+      - --config
+      - /run/marine-ptz/config.yaml
+      - --source
+      - path:/inputs/input.mp4
+      - --model
+      - /models/model.pt
+      - --device
+      - cuda:0
+      - --target-class
+      - marine_target
+      - --confidence
+      - "0.60"
+      - --actuator-backend
+      - simulated
+      - --runtime-mode
+      - concurrent
+      - --output
+      - /artifacts/annotated.mp4
+      - --output-fps
+      - "30"

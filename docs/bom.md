@@ -3,10 +3,10 @@
 | Item | Status | Purpose / notes |
 | --- | --- | --- |
 | Ubuntu laptop with NVIDIA GPU | Available | Capture, detection, control, telemetry, and serial host. |
-| InnoMaker U20CAM-1080P USB camera | Arriving | 1080p image source; verify V4L2 compatibility and device path. |
-| Arduino Uno R3-compatible controller | Available | Candidate controller; USB serial and firmware behavior require bench verification. |
-| XiaoR Geek two-servo pan/tilt assembly | Available | Candidate SG90-class servos; models, direction, limits, and current draw require verification. |
-| Regulated 5 V, 3 A external supply | Available | Dedicated servo power; verify polarity, voltage, and capacity against delivered servo specifications; share ground with Arduino. |
+| InnoMaker U20CAM-1080P USB camera | Delivered / observed | 1920×1080 MJPEG at 30 FPS was observed through the configured machine-specific by-id path. |
+| Arduino Uno R3-compatible controller | Delivered / observed | Firmware upload, USB serial handshake, and bounded integrated commands were observed; recheck identity after USB changes. |
+| XiaoR Geek two-servo pan/tilt assembly | Delivered / observed | Loaded controlled motion was observed within 75–105 degrees; exact servo current, long-duration wear, and broader travel remain unqualified. |
+| Regulated 5 V, 3 A external supply | Delivered / used | Dedicated servo power with common ground is mandatory; polarity, voltage, and capacity still require operator checks before each powered setup. |
 | Green Toys tugboat | Available | Initial physical marine target. |
 | USB cable for Arduino | Verify | Data/power link from laptop. |
 | Jumper wires / suitable servo extension | Verify | Servo signals, common ground, and power distribution. |
@@ -28,13 +28,15 @@ tax, shipping, and any price not listed here.
 
 The three priced rig items total about **$79.58**, which is within the stated
 rough $60–80 rig target before tax and shipping. This is a planning subtotal,
-not a purchase record or a claim that all delivered parts are verified.
+not a purchase record or a claim that every electrical, mechanical, or
+long-duration characteristic has been qualified.
 
 ## Zoom scope
 
 The current camera/rig has no motorized optical zoom. Detection and tracking
-use the full fixed-field-of-view image. Any crop, bounding box, or annotation
-is a software visualization and is not optical zoom.
+always use the full fixed-field-of-view image. The optional automatic digital
+zoom is a downstream software crop for annotation and recording only; it does
+not add optical detail or change detector/controller coordinates.
 
 The software vision baseline is Ultralytics 8.4.104 with lightweight
 `yolo11n.pt`, Torch 2.11.0+cu128, torchvision 0.26.0+cu128, and

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import signal
 from contextlib import contextmanager
 from pathlib import Path
-import signal
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -23,6 +24,9 @@ class FakeImage:
     def copy(self) -> FakeImage:
         if self.copy_error is not None:
             raise self.copy_error
+        return FakeImage()
+
+    def __getitem__(self, key: object) -> FakeImage:
         return FakeImage()
 
 
@@ -62,21 +66,29 @@ class FakeWriter:
         *,
         opened: bool = True,
         write_error: Exception | None = None,
+        fail_on_write_number: int | None = None,
     ) -> None:
         self.frames: list[object] = []
         self.opened = opened
         self.write_error = write_error
+        self.fail_on_write_number = fail_on_write_number
+        self.write_count = 0
         self.released = False
+        self.release_count = 0
 
     def isOpened(self) -> bool:
         return self.opened
 
     def write(self, image: object) -> None:
-        if self.write_error is not None:
+        self.write_count += 1
+        if self.write_error is not None and (
+            self.fail_on_write_number is None or self.write_count == self.fail_on_write_number
+        ):
             raise self.write_error
         self.frames.append(image)
 
     def release(self) -> None:
+        self.release_count += 1
         self.released = True
 
 
@@ -84,6 +96,7 @@ class FakeCV2:
     FONT_HERSHEY_SIMPLEX = 0
     LINE_AA = 0
     MARKER_CROSS = 0
+    INTER_LINEAR = 1
 
     def __init__(
         self,
@@ -98,6 +111,9 @@ class FakeCV2:
         self.writer_error = writer_error
         self.annotation_error = annotation_error
         self.windows_destroyed = False
+        self.annotation_text: list[str] = []
+        self.shown_frames: list[object] = []
+        self.resize_calls: list[tuple[object, tuple[int, int]]] = []
 
     def VideoWriter_fourcc(self, *values: str) -> int:
         return 1
@@ -112,7 +128,7 @@ class FakeCV2:
             raise self.annotation_error
 
     def putText(self, *args: object) -> None:
-        pass
+        self.annotation_text.append(str(args[1]))
 
     def drawMarker(self, *args: object) -> None:
         pass
@@ -120,8 +136,18 @@ class FakeCV2:
     def line(self, *args: object) -> None:
         pass
 
-    def imshow(self, *args: object) -> None:
-        pass
+    def resize(
+        self,
+        image: object,
+        size: tuple[int, int],
+        *,
+        interpolation: int,
+    ) -> FakeImage:
+        self.resize_calls.append((image, size))
+        return FakeImage()
+
+    def imshow(self, _name: str, image: object) -> None:
+        self.shown_frames.append(image)
 
     def waitKey(self, delay: int) -> int:
         return self.wait_key
@@ -135,6 +161,9 @@ def options(
     output: Path | None = None,
     display: bool = False,
     max_frames: int | None = None,
+    digital_zoom: bool = False,
+    max_digital_zoom: float = 2.0,
+    output_fps: float | None = None,
 ) -> VisionOptions:
     return VisionOptions(
         source="video.mp4",
@@ -147,6 +176,9 @@ def options(
         max_frames=max_frames,
         display=display,
         output=output,
+        digital_zoom=digital_zoom,
+        max_digital_zoom=max_digital_zoom,
+        output_fps=output_fps,
     )
 
 
@@ -178,8 +210,9 @@ def test_simulated_closed_loop_handles_target_and_lost_target() -> None:
     assert source.closed is True
     assert "target=boat" in lines[0]
     assert "target=none" in lines[1]
-    assert "pan=93.00 tilt=93.00" in lines[0]
-    assert "pan=93.00 tilt=93.00" in lines[1]
+    assert "logical_pan=93.00 logical_tilt=93.00" in lines[0]
+    assert "logical_pan=93.00 logical_tilt=93.00" in lines[1]
+    assert "physical_pan=n/a physical_tilt=n/a" in lines[0]
 
 
 def test_cleanup_releases_source_writer_and_windows_after_normal_eof(
@@ -201,6 +234,79 @@ def test_cleanup_releases_source_writer_and_windows_after_normal_eof(
     assert writer.released is True
     assert len(writer.frames) == 1
     assert cv2.windows_destroyed is True
+
+
+def test_zoomed_writer_and_display_receive_the_same_rendered_view(tmp_path: Path) -> None:
+    writer = FakeWriter()
+    cv2 = FakeCV2(writer)
+    source = FakeSource([frame(0), None], cv2)
+    detector = FakeDetector([(Detection("boat", 0.9, 70, 40, 90, 60),)])
+
+    run_vision(
+        load_config("configs/development.yaml"),
+        options(
+            output=tmp_path / "zoomed.mp4",
+            display=True,
+            digital_zoom=True,
+            max_digital_zoom=2.0,
+        ),
+        source_factory=lambda value: source,
+        detector_factory=lambda *args, **kwargs: detector,
+    )
+
+    assert len(cv2.resize_calls) == 1
+    assert len(writer.frames) == 1
+    assert cv2.shown_frames == writer.frames
+    assert any(text.startswith("digital_zoom=1.25x") for text in cv2.annotation_text)
+
+
+def test_output_video_uses_wall_clock_timestamps_without_changing_display_rate(
+    tmp_path: Path,
+) -> None:
+    writer = FakeWriter()
+    cv2 = FakeCV2(writer)
+    source = FakeSource([frame(0), frame(1), None], cv2)
+    detector = FakeDetector([(), ()])
+    timestamps = iter((0.0, 0.11))
+
+    processed = run_vision(
+        load_config("configs/development.yaml"),
+        options(output=tmp_path / "annotated.mp4", display=True, output_fps=30.0),
+        source_factory=lambda value: source,
+        detector_factory=lambda *args, **kwargs: detector,
+        monotonic=lambda: next(timestamps),
+    )
+
+    assert processed == 2
+    assert len(cv2.shown_frames) == 2
+    assert len(writer.frames) == 4
+    assert writer.frames[0] is cv2.shown_frames[0]
+    assert writer.frames[-1] is cv2.shown_frames[-1]
+    assert writer.released is True
+
+
+def test_digital_zoom_does_not_change_detection_or_controller_coordinates() -> None:
+    selected = Detection("boat", 0.9, 70, 70, 90, 90)
+    command_lines: list[str] = []
+
+    for enabled in (False, True):
+        source = FakeSource([frame(0), None])
+        detector = FakeDetector([(selected,)])
+        lines: list[str] = []
+        run_vision(
+            load_config("configs/development.yaml"),
+            options(digital_zoom=enabled),
+            source_factory=lambda value, source=source: source,
+            detector_factory=lambda *args, detector=detector, **kwargs: detector,
+            emit=lines.append,
+        )
+        command_lines.append(lines[0])
+
+    for line in command_lines:
+        assert "error_px=30.0,30.0" in line
+        assert "logical_pan=93.00 logical_tilt=93.00" in line
+    assert "digital_zoom=1.00x" in command_lines[0]
+    assert "digital_zoom=1.25x" in command_lines[1]
 
 
 def test_cleanup_releases_resources_after_detection_error(tmp_path: Path) -> None:
@@ -230,6 +336,91 @@ def test_cleanup_releases_resources_after_detection_error(tmp_path: Path) -> Non
 def test_q_terminates_display_and_releases_resources() -> None:
     writer = FakeWriter()
     cv2 = FakeCV2(writer, wait_key=ord("q"))
+    source = FakeSource([frame(0), frame(1)], cv2)
+    detector = FakeDetector([(Detection("boat", 0.9, 40, 40, 60, 60),)])
+
+    processed = run_vision(
+        load_config("configs/development.yaml"),
+        options(display=True),
+        source_factory=lambda value: source,
+        detector_factory=lambda *args, **kwargs: detector,
+    )
+
+    assert processed == 1
+    assert source.closed is True
+    assert cv2.windows_destroyed is True
+
+
+def test_annotation_includes_tracking_state() -> None:
+    writer = FakeWriter()
+    cv2 = FakeCV2(writer)
+    source = FakeSource([frame(0), None], cv2)
+    detector = FakeDetector([(Detection("boat", 0.9, 40, 40, 60, 60),)])
+
+    run_vision(
+        load_config("configs/development.yaml"),
+        options(display=True),
+        source_factory=lambda value: source,
+        detector_factory=lambda *args, **kwargs: detector,
+    )
+
+    assert "tracking=locked" in cv2.annotation_text
+
+
+def test_terminal_and_display_diagnostics_distinguish_logical_physical_and_limits() -> None:
+    config = load_config("configs/hardware.yaml")
+    actuator = SimpleNamespace(
+        pan_deg=105.0,
+        tilt_deg=75.0,
+        physical_pan_deg=75,
+        physical_tilt_deg=105,
+    )
+    current_frame = frame(7)
+    error = (12.5, -8.5)
+
+    line = vision_cli._telemetry_line(
+        current_frame,
+        (),
+        None,
+        error,
+        actuator,
+        11.25,
+        9.4,
+        "cuda:0",
+        "arduino_serial",
+        config.actuator.pan_limits,
+        config.actuator.tilt_limits,
+    )
+
+    assert "error_px=12.5,-8.5" in line
+    assert "logical_pan=105.00 logical_tilt=75.00" in line
+    assert "physical_pan=75 physical_tilt=105" in line
+    assert "saturation_pan=max saturation_tilt=min" in line
+
+    cv2 = FakeCV2(FakeWriter())
+    vision_cli._annotate(
+        cv2,
+        current_frame,
+        (),
+        None,
+        error,
+        actuator,
+        11.25,
+        9.4,
+        "cuda:0",
+        config.actuator.pan_limits,
+        config.actuator.tilt_limits,
+    )
+
+    assert "logical pan=105.00 tilt=75.00" in cv2.annotation_text
+    assert "physical pan=75 tilt=105" in cv2.annotation_text
+    assert "saturation pan=max tilt=min" in cv2.annotation_text
+    assert "error=(12.5, -8.5) px" in cv2.annotation_text
+
+
+def test_escape_terminates_display_and_releases_resources() -> None:
+    writer = FakeWriter()
+    cv2 = FakeCV2(writer, wait_key=27)
     source = FakeSource([frame(0), frame(1)], cv2)
     detector = FakeDetector([(Detection("boat", 0.9, 40, 40, 60, 60),)])
 
@@ -317,6 +508,30 @@ def test_writer_write_failure_releases_writer_source_and_windows(tmp_path: Path)
     assert cv2.windows_destroyed is True
 
 
+def test_duplicate_writer_failure_runs_bounded_cleanup_once(tmp_path: Path) -> None:
+    writer = FakeWriter(
+        write_error=RuntimeError("duplicate write failed"),
+        fail_on_write_number=2,
+    )
+    cv2 = FakeCV2(writer)
+    source = FakeSource([frame(0), frame(1), None], cv2)
+    detector = FakeDetector([(), ()])
+    timestamps = iter((0.0, 0.11))
+
+    with pytest.raises(RuntimeError, match="duplicate write failed"):
+        run_vision(
+            load_config("configs/development.yaml"),
+            options(output=tmp_path / "annotated.mp4", display=True, output_fps=30.0),
+            source_factory=lambda value: source,
+            detector_factory=lambda *args, **kwargs: detector,
+            monotonic=lambda: next(timestamps),
+        )
+
+    assert writer.release_count == 1
+    assert source.closed is True
+    assert cv2.windows_destroyed is True
+
+
 @pytest.mark.parametrize(
     ("values", "expected"),
     [
@@ -364,6 +579,11 @@ def test_cli_values_override_configuration_and_defaults_fill_missing_values(
             "320",
             "--max-frames",
             "5",
+            "--digital-zoom",
+            "--max-digital-zoom",
+            "1.75",
+            "--output-fps",
+            "24",
         ]
     )
 
@@ -380,8 +600,51 @@ def test_cli_values_override_configuration_and_defaults_fill_missing_values(
             max_frames=5,
             display=False,
             output=None,
+            digital_zoom=True,
+            max_digital_zoom=1.75,
+            output_fps=24.0,
         )
     ]
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "0.9"])
+def test_cli_rejects_invalid_maximum_digital_zoom_before_source_construction(
+    value: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = vision_cli.main(
+        [
+            "--config",
+            "configs/development.yaml",
+            "--source",
+            "path:fixture.mp4",
+            "--max-digital-zoom",
+            value,
+        ]
+    )
+
+    assert result == 2
+    assert "maximum digital zoom" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "0", "-1"])
+def test_cli_rejects_invalid_output_fps_before_source_construction(
+    value: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    result = vision_cli.main(
+        [
+            "--config",
+            "configs/development.yaml",
+            "--source",
+            "path:fixture.mp4",
+            "--output-fps",
+            value,
+        ]
+    )
+
+    assert result == 2
+    assert "encoded output FPS" in capsys.readouterr().err
 
 
 def test_cli_uses_config_detection_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -393,10 +656,7 @@ def test_cli_uses_config_detection_defaults(monkeypatch: pytest.MonkeyPatch) -> 
     )
 
     assert (
-        vision_cli.main(
-            ["--config", "configs/development.yaml", "--source", "path:video.mp4"]
-        )
-        == 0
+        vision_cli.main(["--config", "configs/development.yaml", "--source", "path:video.mp4"]) == 0
     )
 
     selected = captured[0]
@@ -407,6 +667,36 @@ def test_cli_uses_config_detection_defaults(monkeypatch: pytest.MonkeyPatch) -> 
     assert selected.confidence_threshold == 0.6
     assert selected.iou_threshold == 0.45
     assert selected.image_size == 640
+    assert selected.runtime_mode == "single"
+    assert selected.result_freshness_s is None
+
+
+def test_cli_runtime_mode_and_freshness_override_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: list[VisionOptions] = []
+    monkeypatch.setattr(
+        vision_cli,
+        "run_vision",
+        lambda _config, selected, **_kwargs: captured.append(selected) or 0,
+    )
+
+    result = vision_cli.main(
+        [
+            "--config",
+            "configs/development.yaml",
+            "--source",
+            "path:video.mp4",
+            "--runtime-mode",
+            "concurrent",
+            "--result-freshness",
+            "0.25",
+        ]
+    )
+
+    assert result == 0
+    assert captured[0].runtime_mode == "concurrent"
+    assert captured[0].result_freshness_s == 0.25
 
 
 @pytest.mark.parametrize(
@@ -425,9 +715,10 @@ def test_main_returns_zero_for_normal_runtime_completion(
         lambda _config, _options, **_kwargs: completion,
     )
 
-    assert vision_cli.main(
-        ["--config", "configs/development.yaml", "--source", "path:fixture.mp4"]
-    ) == 0, description
+    assert (
+        vision_cli.main(["--config", "configs/development.yaml", "--source", "path:fixture.mp4"])
+        == 0
+    ), description
 
 
 @pytest.mark.parametrize(
@@ -449,9 +740,10 @@ def test_main_returns_conventional_signal_status(
     monkeypatch.setattr(vision_cli, "_termination_signals", termination_context)
     monkeypatch.setattr(vision_cli, "run_vision", lambda *_args, **_kwargs: 0)
 
-    assert vision_cli.main(
-        ["--config", "configs/development.yaml", "--source", "path:fixture.mp4"]
-    ) == expected
+    assert (
+        vision_cli.main(["--config", "configs/development.yaml", "--source", "path:fixture.mp4"])
+        == expected
+    )
 
 
 def test_main_returns_failure_for_unexpected_component_cancellation(
@@ -463,9 +755,10 @@ def test_main_returns_failure_for_unexpected_component_cancellation(
 
     monkeypatch.setattr(vision_cli, "run_vision", cancel)
 
-    assert vision_cli.main(
-        ["--config", "configs/development.yaml", "--source", "path:fixture.mp4"]
-    ) == 2
+    assert (
+        vision_cli.main(["--config", "configs/development.yaml", "--source", "path:fixture.mp4"])
+        == 2
+    )
     assert "detector cancelled" in capsys.readouterr().err
 
 
@@ -608,6 +901,8 @@ def test_cli_uses_validated_camera_and_serial_paths_when_not_overridden(
     )
 
     assert result == 0
-    assert captured[0].source == 0
+    assert captured[0].source == (
+        "/dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-1080p-S1_SN0001-video-index0"
+    )
     assert captured[0].actuator_backend == "arduino_serial"
     assert captured[0].serial_port is None

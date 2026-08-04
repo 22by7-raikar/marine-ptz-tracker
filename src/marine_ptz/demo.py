@@ -56,9 +56,7 @@ def run(config: AppConfig, *, steps: int, sleep: bool = True) -> None:
             actuator.apply(command)
             if config.runtime.telemetry_enabled:
                 center = target.detection.center if target is not None else None
-                center_text = (
-                    "none" if center is None else f"{center[0]:.1f},{center[1]:.1f}"
-                )
+                center_text = "none" if center is None else f"{center[0]:.1f},{center[1]:.1f}"
                 print(
                     f"seq={frame.sequence:03d} target={center_text} "
                     f"pan={actuator.pan_deg:.2f} tilt={actuator.tilt_deg:.2f}"

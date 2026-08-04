@@ -33,8 +33,7 @@ class MarineTargetSelector:
         candidates = [
             detection
             for detection in detections
-            if _is_valid_detection(detection)
-            and detection.label.casefold() in self._target_classes
+            if _is_valid_detection(detection) and detection.label.casefold() in self._target_classes
         ]
         if not candidates:
             return None
@@ -43,9 +42,7 @@ class MarineTargetSelector:
 
         def rank(detection: Detection) -> tuple[float, ...]:
             center_x, center_y = detection.center
-            distance_squared = (
-                (center_x - frame_center_x) ** 2 + (center_y - frame_center_y) ** 2
-            )
+            distance_squared = (center_x - frame_center_x) ** 2 + (center_y - frame_center_y) ** 2
             return (
                 -detection.confidence,
                 -detection.area,

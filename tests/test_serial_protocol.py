@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 
 from marine_ptz.serial_protocol import (
+    MAX_FRAME_LENGTH,
+    MAX_SEQUENCE,
     AckResponse,
     CenterCommand,
     DegreeValueError,
@@ -15,8 +17,6 @@ from marine_ptz.serial_protocol import (
     FramingIssue,
     HelloCommand,
     LineFramer,
-    MAX_FRAME_LENGTH,
-    MAX_SEQUENCE,
     MalformedFrameError,
     ReadyResponse,
     SequenceValueError,
@@ -93,9 +93,7 @@ def test_incremental_framer_handles_partial_multiple_and_crlf_frames() -> None:
     framer = LineFramer()
 
     assert framer.feed(b"ACK 1 SET 90") == ()
-    events = framer.feed(
-        b" 80\r\nSTATUS 2 1 90 80 ARMED\nREADY 1 1 0.1.0"
-    )
+    events = framer.feed(b" 80\r\nSTATUS 2 1 90 80 ARMED\nREADY 1 1 0.1.0")
 
     assert events == (
         b"ACK 1 SET 90 80",
@@ -118,9 +116,7 @@ def test_framer_discards_non_ascii_through_newline_then_recovers() -> None:
 def test_framer_discards_overlong_line_then_recovers() -> None:
     framer = LineFramer()
 
-    events = framer.feed(
-        b"X" * (MAX_FRAME_LENGTH + 1) + b"\nREADY 1 1 0.1.0\n"
-    )
+    events = framer.feed(b"X" * (MAX_FRAME_LENGTH + 1) + b"\nREADY 1 1 0.1.0\n")
 
     assert len(events) == 2
     assert isinstance(events[0], FramingIssue)

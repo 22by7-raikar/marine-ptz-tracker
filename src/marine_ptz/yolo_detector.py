@@ -74,6 +74,11 @@ class UltralyticsDetector:
         if isinstance(image_size, bool) or not isinstance(image_size, int) or image_size <= 0:
             raise ValueError("image_size must be a positive integer")
         self._device = resolve_inference_device(device, torch_module=torch_module)
+        self._torch = (
+            torch_module
+            if self._device.startswith("cuda") and torch_module is not None
+            else (_load_module("torch") if self._device.startswith("cuda") else None)
+        )
         if model_factory is None:
             ultralytics = _load_module("ultralytics")
             model_factory = ultralytics.YOLO
@@ -101,6 +106,13 @@ class UltralyticsDetector:
     @property
     def last_inference_ms(self) -> float:
         return self._last_inference_ms
+
+    def synchronize(self) -> None:
+        """Synchronize the selected CUDA device when warm-up timing requires it."""
+        if self._torch is None:
+            return
+        index = int(self._device.split(":", 1)[1])
+        self._torch.cuda.synchronize(index)
 
     def detect(self, frame: Frame) -> Sequence[Detection]:
         if frame.image is None:
@@ -195,11 +207,7 @@ def _resolve_class_ids(
 ) -> list[int]:
     if requested is None:
         return []
-    return sorted(
-        class_id
-        for class_id, name in names.items()
-        if name.casefold() in requested
-    )
+    return sorted(class_id for class_id, name in names.items() if name.casefold() in requested)
 
 
 def _to_list(value: Any) -> list[Any]:

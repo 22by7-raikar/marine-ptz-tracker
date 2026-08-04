@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+import re
 import subprocess
 import sys
-import re
-
-import pytest
-import yaml
+from pathlib import Path
 
 import conftest as project_conftest
-
+import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
@@ -35,16 +33,31 @@ def test_ci_workflow_has_hardware_free_base_dev_job() -> None:
     assert job["strategy"]["matrix"]["python-version"] == ["3.11", "3.10"]
 
     commands = "\n".join(step.get("run", "") for step in job["steps"])
-    assert (
-        'python -m pip install --constraint constraints/ci.txt --editable ".[dev]"'
-        in commands
-    )
+    assert "pip install --constraint constraints/ci.txt setuptools" in commands
+    assert "--no-build-isolation" in commands
+    assert '--editable ".[dev]"' in commands
     assert "compileall -q src tests tools" in commands
     assert "tools/smoke_check.py" in commands
-    assert 'pytest -m "not hardware and not gpu"' in commands
+    assert "ruff format --check src tests tools" in commands
+    assert "ruff check src tests tools" in commands
+    assert "python -m pytest" in commands
     assert "python -m pip check" in commands
+    assert "git diff --check" in commands
     assert ".[vision]" not in commands
     assert ".[hardware]" not in commands
+
+
+def test_ci_workflow_builds_and_runs_cpu_only_container_target() -> None:
+    workflow = yaml.load(WORKFLOW.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["container-test"]
+
+    assert job["runs-on"] == "ubuntu-latest"
+    assert job["timeout-minutes"] == "20"
+    checkout, build, run = job["steps"]
+    assert checkout["uses"] == f"actions/checkout@{CHECKOUT_SHA}"
+    assert checkout["with"] == {"persist-credentials": "false"}
+    assert build["run"] == "docker compose --env-file /dev/null -f compose.yaml build test"
+    assert run["run"] == "docker compose --env-file /dev/null -f compose.yaml run --rm test"
 
 
 def test_ci_workflow_uses_pip_cache() -> None:
@@ -112,11 +125,11 @@ def _write_fake_arduino_cli(tmp_path: Path) -> Path:
     fake_cli.write_text(
         "#!/bin/sh\n"
         "set -eu\n"
-        "printf '%s\\n' \"$@\" >> \"$CAPTURE\"\n"
-        "case \"$1\" in\n"
+        'printf \'%s\\n\' "$@" >> "$CAPTURE"\n'
+        'case "$1" in\n'
         "  version)\n"
         "    printf '%s\\n' \"$FAKE_VERSION_OUTPUT\"\n"
-        "    exit \"${FAKE_VERSION_EXIT:-0}\"\n"
+        '    exit "${FAKE_VERSION_EXIT:-0}"\n'
         "    ;;\n"
         "  core) echo 'Arduino AVR Boards arduino:avr 1.8.8' ;;\n"
         "  lib) echo 'Servo 1.3.0' ;;\n"

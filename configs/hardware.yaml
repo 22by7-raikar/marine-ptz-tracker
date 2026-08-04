@@ -1,29 +1,32 @@
-# Intended deployment values. Verify device paths and calibrated limits before use.
-# This is deliberately unresolved; replace it with the exact discovered stable
-# path before an armed run. Never guess a /dev/tty* device.
+# Verified deployment values. The Uno exposed no /dev/serial/by-id link when
+# checked on this host, so the currently verified /dev/ttyACM0 is retained.
+# Recheck the device identity after USB changes; serial ports are never auto-discovered.
 runtime:
   mode: hardware
   telemetry_enabled: true
+  # Concurrent mode remains opt-in until it is physically validated.
+  execution_mode: single
+  result_freshness_s: 0.5
 
 camera:
   source: v4l2
-  device: /dev/video0
+  device: /dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-1080p-S1_SN0001-video-index0
   width: 1920
   height: 1080
   fps: 30
 
 detection:
   backend: ultralytics
-  model: yolo11n.pt
+  model: runs/detect/runs/tugboat/yolo11n-marine-target-v3/weights/best.pt
   device: auto
   confidence_threshold: 0.60
   iou_threshold: 0.45
   image_size: 640
   target_labels:
-    - boat
+    - marine_target
 
 serial:
-  device: /dev/serial/by-id/<verified-uno>
+  device: /dev/ttyACM0
   baudrate: 115200
   read_timeout_s: 0.25
   write_timeout_s: 0.25
@@ -33,19 +36,21 @@ serial:
   boot_grace_seconds: 2.0
   handshake_timeout_seconds: 4.0
   handshake_retry_interval_seconds: 0.25
-  pan_direction: 1
-  tilt_direction: 1
-  pan_offset_deg: 0.0
-  tilt_offset_deg: 0.0
-  physical_pan_limits_deg: [20.0, 160.0]
-  physical_tilt_limits_deg: [35.0, 145.0]
+  # Calibration shows both installed servos require a neutral-preserving
+  # inversion. Map each logical angle through -logical + 180.
+  pan_direction: -1
+  tilt_direction: -1
+  pan_offset_deg: 180.0
+  tilt_offset_deg: 180.0
+  physical_pan_limits_deg: [75.0, 105.0]
+  physical_tilt_limits_deg: [75.0, 105.0]
   neutral_pan_deg: 90.0
   neutral_tilt_deg: 90.0
 
 actuator:
   backend: arduino_serial
-  pan_limits_deg: [20.0, 160.0]
-  tilt_limits_deg: [35.0, 145.0]
+  pan_limits_deg: [75.0, 105.0]
+  tilt_limits_deg: [75.0, 105.0]
   initial_pan_deg: 90.0
   initial_tilt_deg: 90.0
 

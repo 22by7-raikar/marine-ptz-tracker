@@ -12,6 +12,12 @@ Replay only accepts an existing local image or finite video. Named Ultralytics
 models may download if uncached, so use a local model path for network-free
 work. This repository does not include media or model weights.
 
+Acceptance replay deliberately keeps the verified `single` runtime because its
+observer contract records one applied command per processed frame. Use
+`tools/benchmark_runtime.py` for a hardware-free, same-video comparison with
+the opt-in concurrent topology; do not reinterpret that performance report as
+an acceptance or physical-actuation report.
+
 ## Report contract
 
 Schema version 1 reports a replay-sanitized invocation, basename-only input path,
@@ -72,10 +78,12 @@ report and returns process status 3.
 
 Synthetic validation proves deterministic control policy. The blank-frame CUDA
 benchmark measures model inference only. Offline replay measures the production
-software path on local finite media with simulated actuation. A future
-toy-boat result requires representative recorded media and reviewed thresholds.
-A future physical-servo result additionally requires camera, USB, Uno, power,
-mechanical-limit, direction, neutral-position, and end-to-end latency testing.
+software path on local finite media with simulated actuation. A replay
+acceptance claim requires representative recorded media and reviewed
+thresholds; the measured final container replay is performance evidence, not a
+thresholded acceptance result. A physical-servo claim additionally requires
+camera, USB, Uno, power, mechanical-limit, direction, neutral-position, and
+end-to-end evidence.
 
 ## Observer boundary and failure behavior
 

@@ -1,9 +1,9 @@
-from marine_ptz.interfaces import Actuator, CameraSource, Detector, PTZController, TargetSelector
-from marine_ptz.synthetic import SyntheticCamera, SyntheticTargetDetector
-from marine_ptz.types import AngleLimits, Frame
 from marine_ptz.actuators import SimulatedPTZActuator
 from marine_ptz.config import TrackingConfig
+from marine_ptz.interfaces import Actuator, CameraSource, Detector, PTZController, TargetSelector
+from marine_ptz.synthetic import SyntheticCamera, SyntheticTargetDetector
 from marine_ptz.tracking import HighestConfidenceTargetSelector, ProportionalPTZController
+from marine_ptz.types import AngleLimits, Frame
 
 
 def test_synthetic_components_implement_existing_protocols() -> None:
