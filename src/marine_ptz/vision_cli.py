@@ -12,7 +12,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from numbers import Integral, Real
 from pathlib import Path
 from types import TracebackType
@@ -228,6 +228,33 @@ class _RecorderWorkerState:
     consumed_frames: int = 0
     encoded_frames: int = 0
     duplicated_frames: int = 0
+    consumed_version: int = 0
+    completed: threading.Event = field(default_factory=threading.Event, repr=False)
+    condition: threading.Condition = field(default_factory=threading.Condition, repr=False)
+
+    def mark_consumed(self, version: int) -> None:
+        with self.condition:
+            self.consumed_version = version
+            self.consumed_frames = int(self.recorder.submitted_frame_count)
+            self.condition.notify_all()
+
+    def wait_until_consumed(self, version: int, timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
+        with self.condition:
+            while self.consumed_version < version and not self.completed.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.0:
+                    return False
+                self.condition.wait(remaining)
+            return self.consumed_version >= version
+
+    def mark_completed(self) -> None:
+        with self.condition:
+            self.encoded_frames = int(self.recorder.encoded_frame_count)
+            self.duplicated_frames = int(self.recorder.duplicated_frame_count)
+            self.consumed_frames = int(self.recorder.submitted_frame_count)
+            self.completed.set()
+            self.condition.notify_all()
 
 
 @dataclass(frozen=True, slots=True)
@@ -978,8 +1005,23 @@ def _run_vision_concurrent(
                                 concurrent_rates,
                             )
                             if options.output is not None:
-                                render_channel.publish(_RenderedPacket(rendered, now))
+                                render_version = render_channel.publish(
+                                    _RenderedPacket(rendered, now)
+                                )
                                 recorder_submitted_frames += 1
+                                if (
+                                    capture_state.outcome == "normal_eof"
+                                    and recorder_state is not None
+                                    and not recorder_state.wait_until_consumed(
+                                        render_version,
+                                        float(worker_join_timeout_s),
+                                    )
+                                ):
+                                    _raise_concurrent_failure(failures, stop_requested)
+                                    raise RuntimeError(
+                                        "recorder drain deadline expired before the final "
+                                        "EOF frame was consumed"
+                                    )
                             if options.display:
                                 cv2.imshow("Marine PTZ Tracker", rendered)
                                 if cv2.waitKey(1) & 0xFF in {ord("q"), 27}:
@@ -1059,7 +1101,14 @@ def _run_vision_concurrent(
         primary_traceback = error.__traceback__
 
     shutdown_started_s = time.monotonic()
-    cancellation.set()
+    drain_normal_eof = (
+        primary is None
+        and capture_state.outcome == "normal_eof"
+        and recorder_state is not None
+        and not cancellation.is_set()
+    )
+    if not drain_normal_eof:
+        cancellation.set()
     frame_channel.close()
     detection_channel.close()
     render_channel.close()
@@ -1072,6 +1121,14 @@ def _run_vision_concurrent(
     close_actuator = getattr(actuator, "close", None)
     if callable(close_actuator):
         _capture_cleanup_error(close_actuator, cleanup_errors)
+
+    if (
+        drain_normal_eof
+        and recorder_state is not None
+        and not recorder_state.completed.wait(float(worker_join_timeout_s))
+    ):
+        cleanup_errors.append(RuntimeError("recorder EOF drain deadline expired"))
+    cancellation.set()
 
     _join_concurrent_workers(
         threads,
@@ -1394,6 +1451,7 @@ def _recorder_worker(
                 state.started_s = packet.timestamp_s
             state.finished_s = packet.timestamp_s
             state.recorder.write(packet.image, timestamp_s=packet.timestamp_s)
+            state.mark_consumed(version)
     except BaseException as error:
         failures.record("recorder", error)
         cancellation.set()
@@ -1403,9 +1461,7 @@ def _recorder_worker(
         except BaseException as error:
             failures.record("recorder cleanup", error)
             cancellation.set()
-        state.encoded_frames = int(state.recorder.encoded_frame_count)
-        state.duplicated_frames = int(state.recorder.duplicated_frame_count)
-        state.consumed_frames = int(state.recorder.submitted_frame_count)
+        state.mark_completed()
 
 
 def _wait_for_channel_value(
