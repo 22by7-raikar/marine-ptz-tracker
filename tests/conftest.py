@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-
 _CATEGORY_MARKERS = {"unit", "integration", "hardware", "gpu"}
 
 

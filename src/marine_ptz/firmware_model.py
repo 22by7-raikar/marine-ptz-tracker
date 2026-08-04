@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from collections import deque
-from collections.abc import Callable
-from dataclasses import dataclass
 import math
 import re
 import time
+from collections import deque
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from .serial_protocol import (
+    MAX_SEQUENCE,
+    MAX_WIRE_INTEGER,
+    MIN_WIRE_INTEGER,
+    PROTOCOL_VERSION,
     AckResponse,
     BadCommandError,
     CenterCommand,
@@ -26,11 +30,7 @@ from .serial_protocol import (
     HostCommand,
     IntegerValueError,
     LineFramer,
-    MAX_SEQUENCE,
-    MAX_WIRE_INTEGER,
-    MIN_WIRE_INTEGER,
     MalformedFrameError,
-    PROTOCOL_VERSION,
     ReadyResponse,
     SequenceValueError,
     SetCommand,
@@ -43,7 +43,6 @@ from .serial_protocol import (
     parse_command,
     validate_protocol_degree,
 )
-
 
 FIRMWARE_VERSION = "0.1.0"
 RX_BYTES_PER_LOOP = 16
@@ -88,9 +87,7 @@ class FirmwareSafetyConfig:
             or not math.isfinite(float(self.watchdog_timeout_s))
             or not 0.0 < float(self.watchdog_timeout_s) <= 60.0
         ):
-            raise ValueError(
-                "watchdog timeout must be greater than zero and at most 60 seconds"
-            )
+            raise ValueError("watchdog timeout must be greater than zero and at most 60 seconds")
 
 
 class FirmwareStateMachine:
@@ -191,9 +188,7 @@ class FirmwareStateMachine:
         if isinstance(command, SetCommand):
             if not (
                 self.config.pan_min_deg <= command.pan_deg <= self.config.pan_max_deg
-                and self.config.tilt_min_deg
-                <= command.tilt_deg
-                <= self.config.tilt_max_deg
+                and self.config.tilt_min_deg <= command.tilt_deg <= self.config.tilt_max_deg
             ):
                 return ErrorResponse(command.sequence, ErrorCode.OUT_OF_RANGE)
             if not self.enabled:
@@ -274,8 +269,7 @@ class FirmwareStateMachine:
         if (
             isinstance(command, SetCommand)
             and isinstance(response, ErrorResponse)
-            and response.error_code
-            in {ErrorCode.OUT_OF_RANGE, ErrorCode.NOT_ENABLED}
+            and response.error_code in {ErrorCode.OUT_OF_RANGE, ErrorCode.NOT_ENABLED}
         ):
             self._rejected_set_cache = (command, response)
 
@@ -299,9 +293,7 @@ class FirmwareStreamModel:
         for event in self._framer.feed(data):
             if isinstance(event, FramingIssue):
                 responses.append(
-                    encode_response(
-                        ErrorResponse(0, _error_code_for_exception(event.error))
-                    )
+                    encode_response(ErrorResponse(0, _error_code_for_exception(event.error)))
                 )
             else:
                 responses.extend(self.machine.handle_frame(event))
@@ -325,9 +317,7 @@ class FirmwareRuntimeModel:
         self.machine = machine
         self._stream = FirmwareStreamModel(machine)
         self._rx: deque[int] = deque()
-        self._pending = bytearray(
-            machine.startup_frame() if announce_startup else b""
-        )
+        self._pending = bytearray(machine.startup_frame() if announce_startup else b"")
         self._rx_byte_budget = rx_byte_budget
         self._command_budget = command_budget
         self._tx_byte_budget = tx_byte_budget

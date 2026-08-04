@@ -17,7 +17,7 @@ marine-ptz-vision = "marine_ptz.vision_cli:main"
 marine-ptz-replay = "marine_ptz.replay_cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "ruff>=0.16,<1"]
 hardware = ["pyserial>=3.5,<4"]
 vision = [
     "torch==2.11.0",
@@ -46,3 +46,6 @@ markers = [
 [tool.ruff]
 target-version = "py310"
 line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

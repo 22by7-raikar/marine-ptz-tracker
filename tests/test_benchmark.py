@@ -614,9 +614,15 @@ def test_path_forced_url_values_keep_only_the_safe_url_path_basename(
 def test_benchmark_report_path_typed_urls_never_retain_url_structure(
     tmp_path: Path,
 ) -> None:
-    model_url = "https://model-user:model-pass@models.example/private/custom.pt?token=secret#fragment"
-    image_url = "https://image-user:image-pass@images.example/private/frame.png?token=secret#fragment"
-    output_url = "https://output-user:output-pass@outputs.example/private/result.json?key=secret#fragment"
+    model_url = (
+        "https://model-user:model-pass@models.example/private/custom.pt?token=secret#fragment"
+    )
+    image_url = (
+        "https://image-user:image-pass@images.example/private/frame.png?token=secret#fragment"
+    )
+    output_url = (
+        "https://output-user:output-pass@outputs.example/private/result.json?key=secret#fragment"
+    )
     report_url = "file:///home/alice/private/replay.json?%74oken=%73ecret#fragment"
     config_url = "https://configs.example"
     report = replace(
@@ -735,9 +741,7 @@ def test_environment_metadata_uses_an_explicit_allowlist() -> None:
         },
     )
 
-    assert report.to_dict()["environment"] == {
-        "torch_version": "2.11.0+cu128"
-    }
+    assert report.to_dict()["environment"] == {"torch_version": "2.11.0+cu128"}
 
 
 @pytest.mark.parametrize(
@@ -770,7 +774,9 @@ def test_cli_validation_fails_before_optional_components(monkeypatch: pytest.Mon
     assert error.value.code == 2
 
 
-def test_cli_uses_fake_model_without_model_download(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cli_uses_fake_model_without_model_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     model = FakeModel()
     loaded_models: list[str] = []
 

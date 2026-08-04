@@ -10,7 +10,7 @@ Camera, detector, target-selection, control, and actuator dependencies are repre
 
 ## 2026-07-23: Keep the Arduino narrow
 
-The laptop performs vision and policy. The Arduino's future firmware will validate its serial protocol, reject unsafe angles, and drive servo signals. This keeps the time-sensitive actuator boundary simple and inspectable.
+The laptop performs vision and policy. The Arduino firmware validates its serial protocol, rejects unsafe angles, and drives servo signals. This keeps the time-sensitive actuator boundary simple and inspectable.
 
 ## 2026-07-23: Defer model and transport choices (superseded)
 
@@ -117,3 +117,17 @@ saturation) separate from the generic runtime while ensuring they describe the
 same selection and control behavior that production uses. No default acceptance
 limits are claimed; future toy-boat and physical evidence must set and record
 their own reviewed thresholds.
+
+## 2026-08-02: Split the one-class tugboat dataset by recording session
+
+The physical Green Toys tugboat was not detected by the pretrained YOLO11n
+COCO `boat` baseline. Custom training therefore uses exactly one class,
+`marine_target`. Capture and annotation stay local, and generated media,
+labels, weights, predictions, and runs remain outside Git.
+
+Frames are grouped by recording session before deterministic 70/20/10
+allocation. Neighboring frames from one clip can never cross train,
+validation, and test boundaries. The preparation stage validates normalized
+class-0 boxes and copies rather than mutates staging data. OpenCV and
+Ultralytics remain lazy operator-only dependencies; the core validation/split
+policy is hardware-free and testable without CUDA or model weights.

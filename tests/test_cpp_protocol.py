@@ -1,15 +1,14 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
 import shutil
 import subprocess
+from dataclasses import dataclass
+from pathlib import Path
 
 import pytest
 
 from marine_ptz.firmware_model import FirmwareStateMachine, FirmwareStreamModel
 from marine_ptz.serial_protocol import parse_response
-
 
 ROOT = Path(__file__).resolve().parents[1]
 VECTOR_PATH = ROOT / "tests" / "fixtures" / "serial_protocol_vectors.tsv"
@@ -61,9 +60,7 @@ def _load_vectors() -> tuple[GoldenVector, ...]:
             continue
         fields = line.split("\t")
         if len(fields) != 4:
-            raise AssertionError(
-                f"{VECTOR_PATH}:{line_number}: expected four tab-separated fields"
-            )
+            raise AssertionError(f"{VECTOR_PATH}:{line_number}: expected four tab-separated fields")
         name, startup_text, event_text, expected_text = fields
         events: list[tuple[int, bytes]] = []
         if event_text != "-":
@@ -164,10 +161,7 @@ def test_maximum_payload_vectors_have_exact_independent_lengths() -> None:
 
 def test_all_golden_firmware_responses_fit_the_fixed_payload_buffer() -> None:
     payloads = [
-        payload
-        for vector in VECTORS
-        for payload in vector.expected.split(b"\r\n")
-        if payload
+        payload for vector in VECTORS for payload in vector.expected.split(b"\r\n") if payload
     ]
 
     assert payloads

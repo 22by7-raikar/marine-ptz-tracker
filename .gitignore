@@ -27,7 +27,12 @@ secrets/
 .idea/
 
 # Runtime data and generated artifacts
-data/
+# Keep only the reviewed tugboat dataset schema; all generated dataset content
+# remains local and ignored.
+data/*
+!data/tugboat/
+data/tugboat/*
+!data/tugboat/data.yaml
 datasets/
 models/
 weights/
@@ -36,6 +41,7 @@ captures/
 *.mp4
 *.mov
 *.mkv
+*.avi
 logs/
 runs/
 training-runs/

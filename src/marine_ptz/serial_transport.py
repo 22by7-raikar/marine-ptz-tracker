@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+import math
+import time
 from collections import deque
 from collections.abc import Callable, Iterable
 from importlib import import_module
-import math
 from numbers import Real
-import time
 from typing import Any, Protocol, runtime_checkable
 
 from .serial_protocol import (
+    MAX_FRAME_LENGTH,
     FramingIssue,
     LineFramer,
-    MAX_FRAME_LENGTH,
 )
 
 
@@ -95,9 +95,7 @@ class PySerialTransport:
 
     @property
     def is_open(self) -> bool:
-        return self._connection is not None and bool(
-            getattr(self._connection, "is_open", True)
-        )
+        return self._connection is not None and bool(getattr(self._connection, "is_open", True))
 
     @property
     def may_reset_on_open(self) -> bool:
@@ -132,9 +130,7 @@ class PySerialTransport:
                 except Exception:
                     pass
             self._connection = None
-            raise SerialTransportError(
-                f"unable to open serial port {self._port!r}: {exc}"
-            ) from exc
+            raise SerialTransportError(f"unable to open serial port {self._port!r}: {exc}") from exc
 
     def write(self, data: bytes) -> None:
         connection = self._require_open()
@@ -169,13 +165,9 @@ class PySerialTransport:
                 or written < 0
                 or written > len(data) - offset
             ):
-                raise SerialTransportError(
-                    f"serial write returned invalid byte count {written!r}"
-                )
+                raise SerialTransportError(f"serial write returned invalid byte count {written!r}")
             if written == 0:
-                raise SerialTransportError(
-                    "serial write made no progress before its deadline"
-                )
+                raise SerialTransportError("serial write made no progress before its deadline")
             offset += written
 
     def read_frame(
@@ -214,9 +206,7 @@ class PySerialTransport:
         try:
             connection.reset_input_buffer()
         except Exception as exc:
-            raise SerialTransportError(
-                f"unable to reset serial input buffer: {exc}"
-            ) from exc
+            raise SerialTransportError(f"unable to reset serial input buffer: {exc}") from exc
         self._framer.reset()
         self._frames.clear()
 
@@ -298,9 +288,7 @@ class InMemorySerialTransport:
             return None
         frame = self._responses.popleft()
         if len(frame) > maximum_length:
-            raise SerialTransportError(
-                f"in-memory response exceeds {maximum_length} bytes"
-            )
+            raise SerialTransportError(f"in-memory response exceeds {maximum_length} bytes")
         return frame
 
     def queue_frame(self, frame: bytes) -> None:

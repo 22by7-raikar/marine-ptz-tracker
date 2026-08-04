@@ -1,13 +1,26 @@
 # Architecture
 
+## Deployment boundary
+
+The optional container layer packages the existing composition without moving
+hardware ownership out of its interfaces. Replay exposes no devices and uses
+simulated actuation. The profile-gated hardware template maps only explicit
+camera and serial paths and retains the runtime's `--arm-hardware` gate. A
+read-only preflight checks files, imports, CUDA availability, and supplied
+device path existence without opening a camera, serial transport, detector, or
+actuator. See [deployment and rollback](deployment.md).
+
 ## Responsibility split
 
 ```mermaid
-flowchart LR
+flowchart TD
     Media[Camera or finite media] --> Source[OpenCV CameraSource]
     Source --> YOLO[Ultralytics YOLO Detector]
     YOLO --> Select[Marine TargetSelector]
     Select --> Control[Bounded PTZController]
+    Select --> View[Optional digital crop\nannotation and output only]
+    Source --> View
+    View --> Record[Wall-clock fixed-FPS recorder\nheld annotated frames]
     Control --> Sim[SimulatedPTZActuator\nsafe default]
     Control --> Gate{Explicit Arduino backend\nand --arm-hardware?}
     Gate -->|yes| Host[Host safety checks\nlimits, cancellation, handshake]
@@ -23,9 +36,10 @@ flowchart LR
 ```
 
 The Arduino path is unavailable unless the explicit gate is satisfied. The
-diagram describes implemented software boundaries; camera, serial, servo, and
-watchdog behavior still need physical evidence. The watchdog is a
-communication fallback, not an emergency stop.
+diagram describes implemented software boundaries. Controlled tracking has
+provided camera, serial, servo, and recorded-demo observations, while a
+watchdog-disconnect experiment and longer soak evidence remain separate. The
+watchdog is a communication fallback, not an emergency stop.
 
 ```text
 CameraSource -> Detector -> TargetSelector -> PTZController -> Actuator
@@ -46,7 +60,9 @@ dependency-inversion boundaries. Synthetic components are composed by
 OpenCV capture, Ultralytics detection, marine selection, the existing
 controller, telemetry, and either simulated or explicitly armed serial
 actuation. Backend construction is centralized rather than spread through the
-tracking loop.
+tracking loop. `concurrent_runtime.py` contains only hardware-neutral packet,
+capacity-one channel, failure-mailbox, and metrics primitives; the composition
+and safety boundaries remain in `vision_cli.py`.
 
 ## Data flow
 
@@ -55,12 +71,25 @@ tracking loop.
 3. `TargetSelector.select()` chooses one `Target`, or no target.
 4. `PTZController.command_for()` produces a bounded absolute `PTZCommand`.
 5. `Actuator.apply()` sends that command to a simulated or physical mechanism.
+6. Optional digital zoom transforms the selected overlay and a bounded crop for
+   display/recording only; it never feeds detector or controller input.
+
+The detector, selector, controller, and actuator always operate on the original
+full-frame pixels. `DigitalZoomController` is pure smoothing/geometry state
+downstream of actuation. It estimates magnification from selected-box size,
+clamps to 1.0x through the CLI maximum (2.0x by default), keeps the crop within
+the frame, and eases back toward the full-frame view on target loss. Display and
+recording receive the same newly rendered annotation. The recorder maps those
+unique processed frames onto a fixed encoded-FPS timeline using monotonic
+timestamps; repeated encoded slots hold the previous annotation and never feed
+back into detection, control, telemetry, or display.
 
 For physical actuation the startup order is fixed:
 
 1. parse and validate configuration and CLI interlocks;
 2. construct the OpenCV source and Ultralytics model;
-3. construct selection and control policy;
+3. construct selection/control policy, validate one frame, complete first
+   inference, and initialize requested display/output resources;
 4. open serial and complete correlated `HELLO`/`READY`/`DISABLE`;
 5. call `ENABLE` only when the backend is `arduino_serial` and
    `--arm-hardware` was supplied; and
@@ -70,7 +99,7 @@ Camera or model construction failure therefore occurs before serial opening or
 servo enablement. A serial handshake failure closes resources without calling
 `ENABLE`.
 
-The proportional controller applies per-axis pixel deadbands, normalized proportional gain, maximum step limits, and servo-angle limits. Positive image x/y error increases logical pan/tilt. `ArduinoSerialActuator` maps those logical values through per-axis directions and offsets to integer physical degrees. The host checks logical and physical limits; firmware independently rejects anything outside compile-time limits. Lost-target policy remains in the controller.
+The proportional controller applies per-axis pixel deadbands, normalized proportional gain, maximum step limits, and servo-angle limits. Positive image x/y error increases logical pan/tilt. `ArduinoSerialActuator` maps those logical values through per-axis directions and offsets to integer physical degrees. Physical calibration established that both installed axes use `physical = -logical + 180`, preserving neutral 90 while reversing direction. A target below center raises logical tilt but commands a lower physical angle, which points the camera downward; a target above center does the reverse. The equivalent pan inversion makes camera motion follow horizontal image error. Logical and physical limits are verified at 75–105 on both axes. The host checks logical and physical limits; firmware independently rejects anything outside compile-time limits. Lost-target policy remains in the controller.
 
 The serial boundary is split into a hardware-free codec/framer, a small
 `SerialTransport` protocol, a deterministic firmware state model, and the
@@ -141,6 +170,72 @@ new `ENABLE` or `SET` is initiated. A write already handed to the serial/OS
 layer may still complete; ordinary control flow then attempts bounded
 `DISABLE` and resource cleanup.
 
+Hardware-mode initialization prepares one frame before serial is opened. That
+pre-enable phase validates capture dimensions, performs the cold first YOLO
+prediction, selects any target, and initializes requested display/output
+resources. Only then does the runtime construct/open the actuator, complete the
+detached handshake, and send `ENABLE`. Its first `SET` is an immediate bounded
+neutral/hold command; the prepared detection is applied on the next configured
+command-rate slot. Empty detections and `hold` target loss continue to resend
+the current safe pose, so normal frame processing refreshes the watchdog without
+inventing motion.
+
+The verified `single` path remains the default and rollback implementation. The
+opt-in `concurrent` path uses one non-daemon capture worker, one non-daemon
+inference worker, the main control/serial/GUI context, and an optional
+non-daemon recorder worker. OpenCV capture and PyTorch/CUDA inference spend most
+of their expensive work in native code, so Python threads allow those stages to
+overlap without introducing multiprocessing ownership or serialization.
+
+Capture and detection-result channels each retain only their newest value.
+Capacity one is intentional: a real-time controller benefits from current
+evidence, not a lossless backlog of increasingly stale frames. Finite OpenCV
+video must provide a validated positive declared FPS. Its capture worker reads
+one validation frame, then waits on an explicit inference-worker readiness
+barrier while that worker constructs the detector, performs representative
+warm-up, and synchronizes CUDA when the detector supports it. Only after this
+barrier does finite-video capture start a monotonic, deadline-based playback
+schedule. Missed deadlines are skipped without catch-up bursts or cumulative
+drift. Live cameras are never artificially paced.
+
+Packets carry capture and inference monotonic timestamps, immutable source/FPS
+metadata, and explicit healthy inference state. A successful empty detection
+tuple is healthy and drives the configured lost-target policy. Normal finite
+EOF closes capture publication without setting the fault/cancellation event;
+the last capacity-one frame, any in-flight inference, the final main-loop
+render/control observation, and the final recorder submission drain before
+bounded cleanup. A decode/read failure remains a hard worker failure, while
+operator cancellation and faults retain immediate bounded shutdown. The main
+context consumes and renders each newly available latest result before checking
+the 10 Hz control deadline.
+Only a due slot selects a target and advances controller state. Its next
+deadline is anchored after the acknowledged command completes, so a delayed
+command skips missed slots instead of bursting or immediately re-entering the
+actuator's sleep-based rate limiter. The due slot uses only the newest result
+younger than the configured freshness limit. If perception fails, stops, or
+becomes stale, cancellation prevents new motion commands and cleanup attempts
+`DISABLE`; no independent command keepalive is allowed to hide the stalled
+perception pipeline. The recorder has its own capacity-one handoff and retains
+the existing monotonic wall-clock frame holding policy, so offered, consumed,
+dropped, encoded, and held/duplicate frame counts remain distinct from unique
+inference, display cadence, and faults. Concurrent metrics also identify source
+kind, declared FPS, pacing status, normal EOF versus capture fault, stage counts,
+and shutdown duration; rates with fewer than two timestamps remain null rather
+than implying a measured FPS.
+
+Every worker reports its first failure to the main context, closes its outbound
+channel, and observes one shared event. Normal threads are joined with a bounded
+deadline; daemon threads are not used as a shutdown substitute. The capture
+worker owns construction, reads, and normal release of its source; only the
+bounded shutdown escape hatch may call an idempotent source close to unblock a
+stuck native read. The inference worker alone constructs and invokes its model,
+and only the main context constructs and calls the actuator. A physical
+concurrent run established the worker topology, approximately 30 Hz inference,
+approximately 10 Hz commands, watchdog stability, and bounded shutdown, but
+also exposed control-coupled 10 Hz rendering. The corrected render/control
+schedule is hardware-free tested and still requires controlled physical
+revalidation. Use `single` as the rollback until that evidence is recorded.
+
 Offline replay does not duplicate this loop. `run_vision()` has an optional
 observer that receives frozen start, applied-frame, processing-end, and normal
 completion snapshots. No snapshot exposes a source, detector, actuator, serial
@@ -154,3 +249,26 @@ source/detector factories only when invoked by an operator with local media and
 a model. Replay report serialization replaces local CLI/configuration paths
 with basename-only markers while retaining generic URL/secret redaction. The
 observer does not own vision, selection, controller, or actuator policy.
+
+Dataset preparation is a separate, local-only path and never enters the live
+tracking composition. Camera recording and finite-clip extraction import
+OpenCV only when their operator commands run. Pure label validation and
+whole-recording-session splitting live in `marine_ptz.dataset`; training and
+held-out evaluation are thin, lazy Ultralytics wrappers. The checked-in schema
+defines exactly class `marine_target`, while all images, labels, recordings,
+weights, predictions, and runs remain ignored. No dataset tool imports or opens
+the serial/actuator boundary.
+
+Held-out evaluation classifies test images from their YOLO labels. Nonempty
+labels form the positive set; manually reviewed zero-byte labels form the
+negative set. Standard Ultralytics box metrics remain unchanged, while a
+separate thresholded pass reports negative-image false positives and saves
+annotated examples only when they occur. The wrapper imports Ultralytics only
+when invoked.
+
+Private Platform exports enter only through the local NDJSON importer. It
+validates the one-class metadata and normalized boxes, resolves annotated rows
+to original staging images by unique exact basename, and atomically publishes a
+new session-preserving staging tree. Embedded export URLs are never fetched.
+The existing splitter consumes that new tree; the partially annotated original
+extraction tree is not a valid substitute.

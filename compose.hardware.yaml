@@ -1,0 +1,88 @@
+name: marine-ptz-hardware
+
+x-runtime-security: &runtime-security
+  init: true
+  read_only: true
+  network_mode: none
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=512m,uid=10001,gid=10001
+
+services:
+  hardware:
+    <<: *runtime-security
+    profiles: [hardware]
+    image: "${MARINE_PTZ_IMAGE:-marine-ptz:runtime-local}"
+    pull_policy: never
+    build:
+      context: .
+      target: runtime-headless
+    environment:
+      MARINE_PTZ_PREFLIGHT_MODE: hardware
+      MARINE_PTZ_CONFIG: /run/marine-ptz/config.yaml
+      MARINE_PTZ_MODEL: /models/model.pt
+      MARINE_PTZ_OUTPUT_DIRECTORY: /artifacts
+      MARINE_PTZ_TARGET_CLASS: marine_target
+      MARINE_PTZ_CONFIDENCE: "0.60"
+      MARINE_PTZ_DEVICE: cuda:0
+      MARINE_PTZ_RUNTIME_MODE: single
+      MARINE_PTZ_CAMERA_DEVICE: /dev/marine-ptz-camera
+      MARINE_PTZ_SERIAL_DEVICE: /dev/marine-ptz-serial
+      MARINE_PTZ_ARM_HARDWARE: "true"
+      NVIDIA_VISIBLE_DEVICES: "${MARINE_PTZ_GPU_DEVICE:?set an explicit GPU device}"
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      - type: bind
+        source: "${MARINE_PTZ_CONFIG:?set an absolute hardware configuration file path}"
+        target: /run/marine-ptz/config.yaml
+        read_only: true
+      - type: bind
+        source: "${MARINE_PTZ_MODEL:?set an absolute local model file path}"
+        target: /models/model.pt
+        read_only: true
+      - type: bind
+        source: "${MARINE_PTZ_ARTIFACTS:?set an absolute existing artifact directory}"
+        target: /artifacts
+    devices:
+      - "${MARINE_PTZ_CAMERA_DEVICE:?set the exact verified camera device path}:/dev/marine-ptz-camera:r"
+      - "${MARINE_PTZ_SERIAL_DEVICE:?set the exact verified serial device path}:/dev/marine-ptz-serial:rw"
+    group_add:
+      - "${MARINE_PTZ_ARTIFACT_GID:?set the numeric GID owning the artifact directory}"
+      - "${MARINE_PTZ_VIDEO_GID:?set the host video group numeric GID}"
+      - "${MARINE_PTZ_DIALOUT_GID:?set the host dialout group numeric GID}"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command:
+      - python
+      - -m
+      - marine_ptz.vision_cli
+      - --config
+      - /run/marine-ptz/config.yaml
+      - --source
+      - path:/dev/marine-ptz-camera
+      - --model
+      - /models/model.pt
+      - --device
+      - cuda:0
+      - --target-class
+      - marine_target
+      - --confidence
+      - "0.60"
+      - --actuator-backend
+      - arduino_serial
+      - --serial-port
+      - /dev/marine-ptz-serial
+      - --arm-hardware
+      - --runtime-mode
+      - single
+      - --output
+      - /artifacts/annotated.mp4
+      - --output-fps
+      - "30"

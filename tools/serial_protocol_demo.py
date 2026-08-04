@@ -4,19 +4,28 @@
 from __future__ import annotations
 
 import argparse
+import sys
+import time
 from dataclasses import replace
 from pathlib import Path
-import sys
-
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from marine_ptz.config import ConfigError, load_config
-from marine_ptz.firmware_model import FirmwareSafetyConfig, FirmwareStateMachine
-from marine_ptz.serial_actuator import ArduinoSerialActuator, SerialActuatorError
-from marine_ptz.serial_transport import InMemorySerialTransport, SerialTransportError
-from marine_ptz.types import PTZCommand
+from marine_ptz.config import ConfigError, load_config  # noqa: E402
+from marine_ptz.firmware_model import (  # noqa: E402
+    FirmwareSafetyConfig,
+    FirmwareStateMachine,
+)
+from marine_ptz.serial_actuator import (  # noqa: E402
+    ArduinoSerialActuator,
+    SerialActuatorError,
+)
+from marine_ptz.serial_transport import (  # noqa: E402
+    InMemorySerialTransport,
+    SerialTransportError,
+)
+from marine_ptz.types import PTZCommand  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -32,6 +41,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--pan", type=float, default=100.0)
     parser.add_argument("--tilt", type=float, default=80.0)
+    parser.add_argument(
+        "--hold-seconds",
+        type=float,
+        default=0.5,
+        help="keep the physical actuator enabled briefly before closing",
+    )
     args = parser.parse_args(argv)
 
     actuator: ArduinoSerialActuator | None = None
@@ -40,9 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         if config.serial is None:
             raise ConfigError("selected configuration does not define serial settings")
         settings = (
-            replace(config.serial, device=args.port)
-            if args.port is not None
-            else config.serial
+            replace(config.serial, device=args.port) if args.port is not None else config.serial
         )
         if args.port is None:
             firmware = FirmwareStateMachine(
@@ -79,6 +92,8 @@ def main(argv: list[str] | None = None) -> int:
             f"physical={status.pan_deg},{status.tilt_deg} "
             f"watchdog={status.watchdog_state.value}"
         )
+        time.sleep(args.hold_seconds)
+
     except (
         ConfigError,
         SerialActuatorError,

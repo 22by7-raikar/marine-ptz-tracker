@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
-import re
 from typing import Any, Mapping
 
 import yaml
@@ -21,6 +21,8 @@ class ConfigError(ValueError):
 class RuntimeConfig:
     mode: str
     telemetry_enabled: bool
+    execution_mode: str
+    result_freshness_s: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +131,16 @@ def load_config(path: str | Path) -> AppConfig:
 
     _validate_backend_requirements(camera, actuator, serial)
 
+    if (
+        actuator.backend == "arduino_serial"
+        and serial is not None
+        and runtime.result_freshness_s >= serial.watchdog_timeout_s
+    ):
+        raise ConfigError(
+            "runtime.result_freshness_s must be less than "
+            "serial.watchdog_timeout_s for Arduino actuation"
+        )
+
     if tracking.deadband_px >= min(camera.width, camera.height) / 2:
         raise ConfigError("tracking.deadband_px must be smaller than half the frame")
 
@@ -150,11 +162,26 @@ def _validate_backend_requirements(
 
 def _runtime_config(data: Mapping[str, Any]) -> RuntimeConfig:
     path = "runtime"
-    _only_keys(data, {"mode", "telemetry_enabled"}, path)
+    _only_keys(
+        data,
+        {"mode", "telemetry_enabled", "execution_mode", "result_freshness_s"},
+        path,
+    )
     mode = _string(data, "mode", path)
     if mode not in {"development", "hardware"}:
         raise ConfigError("runtime.mode must be 'development' or 'hardware'")
-    return RuntimeConfig(mode, _boolean(data, "telemetry_enabled", path))
+    execution_mode = _optional_string(data, "execution_mode", path, "single")
+    if execution_mode not in {"single", "concurrent"}:
+        raise ConfigError("runtime.execution_mode must be 'single' or 'concurrent'")
+    result_freshness = _optional_number(data, "result_freshness_s", path, 0.5)
+    if result_freshness <= 0.0:
+        raise ConfigError("runtime.result_freshness_s must be greater than zero")
+    return RuntimeConfig(
+        mode,
+        _boolean(data, "telemetry_enabled", path),
+        execution_mode,
+        result_freshness,
+    )
 
 
 def _camera_config(data: Mapping[str, Any]) -> CameraConfig:
@@ -276,9 +303,7 @@ def _tracking_config(data: Mapping[str, Any]) -> TrackingConfig:
     if update_rate <= 0:
         raise ConfigError("tracking.update_rate_hz must be greater than zero")
     if behavior not in {"hold", "return_to_neutral"}:
-        raise ConfigError(
-            "tracking.lost_target_behavior must be 'hold' or 'return_to_neutral'"
-        )
+        raise ConfigError("tracking.lost_target_behavior must be 'hold' or 'return_to_neutral'")
     return TrackingConfig(deadband, gain, max_step, update_rate, behavior)
 
 
@@ -324,9 +349,7 @@ def _serial_config(data: Mapping[str, Any]) -> SerialConfig:
         60.0,
     )
     if watchdog_timeout <= 2.0 / command_rate:
-        raise ConfigError(
-            "serial.watchdog_timeout_s must exceed two serial command intervals"
-        )
+        raise ConfigError("serial.watchdog_timeout_s must exceed two serial command intervals")
     boot_grace = _bounded_nonnegative_number(
         data,
         "boot_grace_seconds",
@@ -347,8 +370,7 @@ def _serial_config(data: Mapping[str, Any]) -> SerialConfig:
     )
     if boot_grace >= handshake_timeout:
         raise ConfigError(
-            "serial.boot_grace_seconds must be less than "
-            "serial.handshake_timeout_seconds"
+            "serial.boot_grace_seconds must be less than serial.handshake_timeout_seconds"
         )
     if handshake_retry_interval >= handshake_timeout:
         raise ConfigError(
@@ -368,13 +390,9 @@ def _serial_config(data: Mapping[str, Any]) -> SerialConfig:
     _validate_protocol_angle(neutral_pan, "serial.neutral_pan_deg")
     _validate_protocol_angle(neutral_tilt, "serial.neutral_tilt_deg")
     if not physical_pan_limits.contains(neutral_pan):
-        raise ConfigError(
-            "serial.neutral_pan_deg must be within serial.physical_pan_limits_deg"
-        )
+        raise ConfigError("serial.neutral_pan_deg must be within serial.physical_pan_limits_deg")
     if not physical_tilt_limits.contains(neutral_tilt):
-        raise ConfigError(
-            "serial.neutral_tilt_deg must be within serial.physical_tilt_limits_deg"
-        )
+        raise ConfigError("serial.neutral_tilt_deg must be within serial.physical_tilt_limits_deg")
     return SerialConfig(
         _string(data, "device", path),
         baudrate,
@@ -427,14 +445,12 @@ def _validate_serial_mapping(
         )
         if any(not physical.contains(value) for value in mapped):
             raise ConfigError(
-                f"actuator.{axis}_limits_deg maps outside "
-                f"serial.physical_{axis}_limits_deg"
+                f"actuator.{axis}_limits_deg maps outside serial.physical_{axis}_limits_deg"
             )
         mapped_initial = direction * initial + offset
         if abs(mapped_initial - neutral) > 1e-9:
             raise ConfigError(
-                f"mapped actuator.initial_{axis}_deg must equal "
-                f"serial.neutral_{axis}_deg"
+                f"mapped actuator.initial_{axis}_deg must equal serial.neutral_{axis}_deg"
             )
 
 
@@ -446,9 +462,7 @@ def _bounded_positive_number(
 ) -> float:
     value = _number(data, key, path)
     if not 0.0 < value <= maximum:
-        raise ConfigError(
-            f"{path}.{key} must be greater than zero and at most {maximum:g}"
-        )
+        raise ConfigError(f"{path}.{key} must be greater than zero and at most {maximum:g}")
     return value
 
 
@@ -460,9 +474,7 @@ def _bounded_nonnegative_number(
 ) -> float:
     value = _number(data, key, path)
     if not 0.0 <= value <= maximum:
-        raise ConfigError(
-            f"{path}.{key} must be zero or greater and at most {maximum:g}"
-        )
+        raise ConfigError(f"{path}.{key} must be zero or greater and at most {maximum:g}")
     return value
 
 

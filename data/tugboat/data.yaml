@@ -1,0 +1,6 @@
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  - marine_target

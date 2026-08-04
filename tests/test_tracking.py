@@ -1,10 +1,10 @@
-import pytest
 from types import SimpleNamespace
+
+import pytest
 
 from marine_ptz.config import TrackingConfig
 from marine_ptz.tracking import ProportionalPTZController
 from marine_ptz.types import AngleLimits, Detection, Frame, Target
-
 
 PAN_LIMITS = AngleLimits(20.0, 160.0)
 TILT_LIMITS = AngleLimits(35.0, 145.0)

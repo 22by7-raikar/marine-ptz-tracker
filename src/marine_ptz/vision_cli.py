@@ -3,25 +3,40 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-from dataclasses import dataclass, replace
+import json
 import math
-from numbers import Integral, Real
 import signal
 import sys
+import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from numbers import Integral, Real
 from pathlib import Path
 from types import TracebackType
 from typing import Any, NoReturn, Protocol
 
 from .actuators import SimulatedPTZActuator
 from .cancellation import OperationCancelled
+from .concurrent_runtime import (
+    ConcurrentRuntimeMetrics,
+    DetectionPacket,
+    FramePacket,
+    LatestValueChannel,
+    MonotonicControlSchedule,
+    MonotonicPlaybackSchedule,
+    RuntimeMetricsCollector,
+    SourceMetadata,
+    WorkerFailureBox,
+)
 from .config import AppConfig, ConfigError, load_config
+from .digital_zoom import DigitalZoomController, ZoomTransform, identity_transform
 from .opencv_source import OpenCVSource, OpenCVSourceError, parse_source_argument
 from .tracking import MarineTargetSelector, ProportionalPTZController
 from .types import AngleLimits, Detection, Frame, PTZCommand, Target
+from .video_recorder import WallClockVideoRecorder
 from .yolo_detector import UltralyticsDetector, UltralyticsDetectorError
 
 
@@ -40,6 +55,11 @@ class VisionOptions:
     actuator_backend: str = "simulated"
     serial_port: str | None = None
     arm_hardware: bool = False
+    digital_zoom: bool = False
+    max_digital_zoom: float = 2.0
+    output_fps: float | None = None
+    runtime_mode: str = "single"
+    result_freshness_s: float | None = None
 
 
 class RuntimeCleanupError(RuntimeError):
@@ -48,6 +68,10 @@ class RuntimeCleanupError(RuntimeError):
 
 class UnexpectedCancellationError(RuntimeError):
     """Raised when a component cancels without a runtime termination request."""
+
+
+class StalePerceptionError(RuntimeError):
+    """Raised when concurrent perception can no longer safely drive motion."""
 
 
 class RuntimeSecondaryFailures(RuntimeError):
@@ -96,6 +120,7 @@ class RuntimeFrameEvent:
     """Immutable snapshot of one successfully applied production-loop command."""
 
     processing_timestamp_s: float
+    frame_capture_timestamp_s: float
     frame_sequence: int
     frame_width: int
     frame_height: int
@@ -179,6 +204,40 @@ class _RuntimeResources:
         return tuple(errors)
 
 
+@dataclass(frozen=True, slots=True)
+class _RenderedPacket:
+    image: Any
+    timestamp_s: float
+
+
+@dataclass(slots=True)
+class _CaptureWorkerState:
+    source: Any | None = None
+    cv2: Any | None = None
+    metadata: SourceMetadata | None = None
+    outcome: str = "not_started"
+    playback_started_s: float | None = None
+    detector_readiness_s: float | None = None
+
+
+@dataclass(slots=True)
+class _RecorderWorkerState:
+    recorder: Any
+    started_s: float | None = None
+    finished_s: float | None = None
+    consumed_frames: int = 0
+    encoded_frames: int = 0
+    duplicated_frames: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _ConcurrentRates:
+    unique_inference_fps: float
+    display_fps: float
+    control_hz: float
+    encoded_output_fps: float | None
+
+
 class _CommandRateLimiter:
     def __init__(
         self,
@@ -238,22 +297,76 @@ def run_vision(
     stop_requested: Callable[[], bool] = _never_terminated,
     emit: Callable[[str], None] = print,
     observer: RuntimeObserver | None = None,
+    concurrent_metrics_sink: Callable[[ConcurrentRuntimeMetrics], None] | None = None,
+    worker_join_timeout_s: float = 2.0,
 ) -> int:
-    """Run the unified pipeline and return the number of processed frames."""
+    """Run the selected pipeline and return its processed-frame count."""
     _validate_options(config, options)
+    if options.runtime_mode == "concurrent":
+        return _run_vision_concurrent(
+            config,
+            options,
+            source_factory=source_factory,
+            detector_factory=detector_factory,
+            actuator_factory=actuator_factory,
+            monotonic=monotonic,
+            rate_monotonic=rate_monotonic,
+            sleep=sleep,
+            stop_requested=stop_requested,
+            emit=emit,
+            observer=observer,
+            metrics_sink=concurrent_metrics_sink,
+            worker_join_timeout_s=worker_join_timeout_s,
+        )
+    return _run_vision_single(
+        config,
+        options,
+        source_factory=source_factory,
+        detector_factory=detector_factory,
+        actuator_factory=actuator_factory,
+        monotonic=monotonic,
+        rate_monotonic=rate_monotonic,
+        sleep=sleep,
+        stop_requested=stop_requested,
+        emit=emit,
+        observer=observer,
+    )
+
+
+def _run_vision_single(
+    config: AppConfig,
+    options: VisionOptions,
+    *,
+    source_factory: Callable[..., Any] = OpenCVSource,
+    detector_factory: Callable[..., Any] = UltralyticsDetector,
+    actuator_factory: Callable[[AppConfig, VisionOptions], Any] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    rate_monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    stop_requested: Callable[[], bool] = _never_terminated,
+    emit: Callable[[str], None] = print,
+    observer: RuntimeObserver | None = None,
+) -> int:
+    """Run the verified single-threaded pipeline."""
 
     resources = _RuntimeResources(display=options.display)
     processed = 0
     frame_times: deque[float] = deque(maxlen=31)
-    exit_reason = "eof"
     processing_started_s: float | None = None
     processing_end_notified = False
     observer_started = False
+    prepared_frame: tuple[Frame, Sequence[Detection], Target | None] | None = None
+    pre_enable_eof = False
     rate_limiter = _CommandRateLimiter(
         config.tracking.update_rate_hz,
         monotonic=rate_monotonic,
         sleep=sleep,
     )
+    zoom_controller = DigitalZoomController(
+        enabled=options.digital_zoom,
+        max_zoom=options.max_digital_zoom,
+    )
+    output_fps = _output_fps(config, options)
 
     def finish_processing(reason: str) -> None:
         nonlocal processing_end_notified
@@ -296,15 +409,50 @@ def run_vision(
         if options.display or options.output is not None:
             resources.cv2 = source.cv2
 
-        if actuator_factory is None:
-            actuator = _build_actuator(
-                config,
-                options,
-                cancellation_requested=stop_requested,
-            )
-        else:
-            actuator = actuator_factory(config, options)
-        resources.actuator = actuator
+        if options.actuator_backend == "arduino_serial":
+            # The first Ultralytics prediction performs cold initialization and
+            # may exceed the firmware watchdog. Keep outputs detached until one
+            # real frame has validated the camera and completed that prediction.
+            _raise_if_terminated(stop_requested)
+            frame = source.read()
+            if frame is None:
+                pre_enable_eof = True
+                emit("source reached EOF during pre-enable validation; actuator remains disabled")
+            else:
+                _raise_if_terminated(stop_requested)
+                _validate_runtime_frame(frame)
+                detections = detector.detect(frame)
+                _raise_if_terminated(stop_requested)
+                target = selector.select(frame, detections)
+                _raise_if_terminated(stop_requested)
+                prepared_frame = (frame, detections, target)
+                if resources.cv2 is not None:
+                    if options.display:
+                        resources.cv2.namedWindow("Marine PTZ Tracker")
+                    if options.output is not None:
+                        resources.writer = _open_writer(
+                            resources.cv2,
+                            options.output,
+                            frame.width,
+                            frame.height,
+                            output_fps,
+                        )
+                emit(
+                    "initialization complete: camera validated, model warm-up complete, "
+                    "display/output ready"
+                )
+
+        actuator: Any | None = None
+        if not pre_enable_eof:
+            if actuator_factory is None:
+                actuator = _build_actuator(
+                    config,
+                    options,
+                    cancellation_requested=stop_requested,
+                )
+            else:
+                actuator = actuator_factory(config, options)
+            resources.actuator = actuator
         if observer is not None:
             processing_started_s = _runtime_timestamp(monotonic)
             observer.on_start(
@@ -314,14 +462,18 @@ def run_vision(
                     total_frames_available=_total_frames_available(source),
                     resolved_device=str(detector.active_device),
                     actuator_backend=options.actuator_backend,
-                    initial_pan_deg=float(actuator.pan_deg),
-                    initial_tilt_deg=float(actuator.tilt_deg),
+                    initial_pan_deg=float(
+                        controller.pan_deg if actuator is None else actuator.pan_deg
+                    ),
+                    initial_tilt_deg=float(
+                        controller.tilt_deg if actuator is None else actuator.tilt_deg
+                    ),
                     pan_limits=config.actuator.pan_limits,
                     tilt_limits=config.actuator.tilt_limits,
                 )
             )
             observer_started = True
-        if options.actuator_backend == "arduino_serial":
+        if options.actuator_backend == "arduino_serial" and actuator is not None:
             _bind_cancellation_predicate(actuator, stop_requested)
             _raise_if_terminated(stop_requested)
             _hardware_method(actuator, "open")()
@@ -335,32 +487,56 @@ def run_vision(
             # outputs. A request after this point is handled by the actuator's
             # own cancellation predicate before its transport write.
             _raise_if_terminated(stop_requested)
+            emit("actuator handshake complete; sending ENABLE")
             _hardware_method(actuator, "enable")()
+            _raise_if_terminated(stop_requested)
+            if prepared_frame is None:
+                raise RuntimeError("hardware actuator enabled without a prepared camera frame")
+            first_frame = prepared_frame[0]
+            first_hold = controller.command_for_target(first_frame, None)
+            _raise_if_terminated(stop_requested)
+            rate_limiter.wait()
+            _raise_if_terminated(stop_requested)
+            emit(
+                f"sending first hold SET pan={first_hold.pan_deg:.2f} "
+                f"tilt={first_hold.tilt_deg:.2f}"
+            )
+            actuator.apply(first_hold)
 
         while True:
             if options.max_frames is not None and processed >= options.max_frames:
                 exit_reason = "max_frames"
                 break
-            _raise_if_terminated(stop_requested)
-            frame = source.read()
-            if frame is None:
+            if pre_enable_eof:
                 exit_reason = "eof"
                 break
             _raise_if_terminated(stop_requested)
-            _validate_runtime_frame(frame)
-            detections = detector.detect(frame)
-            _raise_if_terminated(stop_requested)
-            target = selector.select(frame, detections)
-            _raise_if_terminated(stop_requested)
+            if prepared_frame is not None:
+                frame, detections, target = prepared_frame
+                prepared_frame = None
+            else:
+                frame = source.read()
+                if frame is None:
+                    exit_reason = "eof"
+                    break
+                _raise_if_terminated(stop_requested)
+                _validate_runtime_frame(frame)
+                detections = detector.detect(frame)
+                _raise_if_terminated(stop_requested)
+                target = selector.select(frame, detections)
+                _raise_if_terminated(stop_requested)
             rate_limiter.wait()
             _raise_if_terminated(stop_requested)
             command = controller.command_for_target(frame, target)
             _raise_if_terminated(stop_requested)
+            if actuator is None:
+                raise RuntimeError("runtime actuator is unavailable")
             actuator.apply(command)
 
             now = _runtime_timestamp(monotonic) if observer is not None else monotonic()
             event = RuntimeFrameEvent(
                 processing_timestamp_s=now,
+                frame_capture_timestamp_s=float(frame.timestamp_s),
                 frame_sequence=frame.sequence,
                 frame_width=frame.width,
                 frame_height=frame.height,
@@ -378,6 +554,11 @@ def run_vision(
             frame_times.append(now)
             rolling_fps = _rolling_fps(frame_times)
             error = _target_error(frame, target)
+            zoom_transform = zoom_controller.update(
+                frame.width,
+                frame.height,
+                None if target is None else target.detection,
+            )
             emit(
                 _telemetry_line(
                     frame,
@@ -389,6 +570,9 @@ def run_vision(
                     rolling_fps,
                     detector.active_device,
                     options.actuator_backend,
+                    config.actuator.pan_limits,
+                    config.actuator.tilt_limits,
+                    zoom_transform.zoom_factor,
                 )
             )
 
@@ -403,6 +587,9 @@ def run_vision(
                     detector.last_inference_ms,
                     rolling_fps,
                     detector.active_device,
+                    config.actuator.pan_limits,
+                    config.actuator.tilt_limits,
+                    zoom_transform,
                 )
                 if options.output is not None:
                     if resources.writer is None:
@@ -411,12 +598,12 @@ def run_vision(
                             options.output,
                             frame.width,
                             frame.height,
-                            config.camera.fps,
+                            output_fps,
                         )
-                    resources.writer.write(rendered)
+                    resources.writer.write(rendered, timestamp_s=now)
                 if options.display:
                     resources.cv2.imshow("Marine PTZ Tracker", rendered)
-                    if resources.cv2.waitKey(1) & 0xFF == ord("q"):
+                    if resources.cv2.waitKey(1) & 0xFF in {ord("q"), 27}:
                         processed += 1
                         exit_reason = "display_q"
                         break
@@ -463,8 +650,7 @@ def run_vision(
                 f"request: {cancellation}; cleanup also failed: {cleanup_errors[0]}"
             ) from cancellation
         raise UnexpectedCancellationError(
-            "unexpected OperationCancelled without a recorded termination "
-            f"request: {cancellation}"
+            f"unexpected OperationCancelled without a recorded termination request: {cancellation}"
         ) from cancellation
     except BaseException as primary:
         primary_traceback = primary.__traceback__
@@ -510,6 +696,835 @@ def run_vision(
     return processed
 
 
+def _run_vision_concurrent(
+    config: AppConfig,
+    options: VisionOptions,
+    *,
+    source_factory: Callable[..., Any],
+    detector_factory: Callable[..., Any],
+    actuator_factory: Callable[[AppConfig, VisionOptions], Any] | None,
+    monotonic: Callable[[], float],
+    rate_monotonic: Callable[[], float],
+    sleep: Callable[[float], None],
+    stop_requested: Callable[[], bool],
+    emit: Callable[[str], None],
+    observer: RuntimeObserver | None,
+    metrics_sink: Callable[[ConcurrentRuntimeMetrics], None] | None,
+    worker_join_timeout_s: float,
+) -> int:
+    """Run capture, inference, rendering, and control with bounded handoffs."""
+    if observer is not None:
+        raise ValueError(
+            "runtime observers currently require --runtime-mode single; "
+            "concurrent metrics use concurrent_metrics_sink"
+        )
+    if (
+        isinstance(worker_join_timeout_s, bool)
+        or not isinstance(worker_join_timeout_s, Real)
+        or not math.isfinite(float(worker_join_timeout_s))
+        or worker_join_timeout_s <= 0.0
+    ):
+        raise ValueError("worker join timeout must be a finite positive number")
+
+    freshness_s = (
+        config.runtime.result_freshness_s
+        if options.result_freshness_s is None
+        else float(options.result_freshness_s)
+    )
+    cancellation = threading.Event()
+    detector_ready = threading.Event()
+    frame_channel: LatestValueChannel[FramePacket] = LatestValueChannel()
+    detection_channel: LatestValueChannel[DetectionPacket] = LatestValueChannel()
+    render_channel: LatestValueChannel[_RenderedPacket] = LatestValueChannel()
+    failures = WorkerFailureBox()
+    metrics = RuntimeMetricsCollector()
+    capture_state = _CaptureWorkerState()
+    recorder_state: _RecorderWorkerState | None = None
+    threads: list[threading.Thread] = []
+    actuator: Any | None = None
+    cv2: Any | None = None
+    display_initialized = False
+    disable_needed = False
+    processed = 0
+    recorder_submitted_frames = 0
+    primary: BaseException | None = None
+    primary_traceback: TracebackType | None = None
+    cleanup_errors: list[Exception] = []
+
+    selector = MarineTargetSelector(options.target_classes)
+    controller = ProportionalPTZController(
+        config.tracking,
+        config.actuator.pan_limits,
+        config.actuator.tilt_limits,
+        initial_pan_deg=config.actuator.initial_pan_deg,
+        initial_tilt_deg=config.actuator.initial_tilt_deg,
+    )
+    zoom_controller = DigitalZoomController(
+        enabled=options.digital_zoom,
+        max_zoom=options.max_digital_zoom,
+    )
+    frame_times: deque[float] = deque(maxlen=31)
+    output_fps = _output_fps(config, options)
+
+    try:
+        capture_thread = threading.Thread(
+            name="marine-ptz-capture",
+            target=_capture_worker,
+            kwargs={
+                "configured_source": options.source,
+                "source_factory": source_factory,
+                "channel": frame_channel,
+                "state": capture_state,
+                "failures": failures,
+                "cancellation": cancellation,
+                "detector_ready": detector_ready,
+                "monotonic": monotonic,
+                "sleep": sleep,
+                "metrics": metrics,
+            },
+        )
+        threads.append(capture_thread)
+        capture_thread.start()
+
+        # Validate one camera frame before the detector worker constructs the
+        # model. Physical actuation still does not exist at this point.
+        first_frame_value = _wait_for_channel_value(
+            frame_channel,
+            failures,
+            cancellation,
+            stop_requested,
+            mark_consumed=False,
+        )
+        if first_frame_value is None:
+            pass
+        else:
+            inference_thread = threading.Thread(
+                name="marine-ptz-inference",
+                target=_inference_worker,
+                kwargs={
+                    "options": options,
+                    "detector_factory": detector_factory,
+                    "frames": frame_channel,
+                    "results": detection_channel,
+                    "failures": failures,
+                    "cancellation": cancellation,
+                    "detector_ready": detector_ready,
+                    "monotonic": monotonic,
+                    "metrics": metrics,
+                },
+            )
+            threads.append(inference_thread)
+            inference_thread.start()
+
+            first_result_value = _wait_for_channel_value(
+                detection_channel,
+                failures,
+                cancellation,
+                stop_requested,
+            )
+            if first_result_value is None:
+                pass
+            else:
+                current_result = first_result_value.value
+                result_version = first_result_value.version
+                first_frame = current_result.frame_packet.frame
+                cv2 = capture_state.cv2
+                if options.display or options.output is not None:
+                    if cv2 is None:
+                        raise RuntimeError("camera source did not expose OpenCV rendering support")
+                    if options.display:
+                        cv2.namedWindow("Marine PTZ Tracker")
+                        display_initialized = True
+                    if options.output is not None:
+                        recorder_state = _RecorderWorkerState(
+                            _open_writer(
+                                cv2,
+                                options.output,
+                                first_frame.width,
+                                first_frame.height,
+                                output_fps,
+                            )
+                        )
+                        recorder_thread = threading.Thread(
+                            name="marine-ptz-recorder",
+                            target=_recorder_worker,
+                            kwargs={
+                                "channel": render_channel,
+                                "state": recorder_state,
+                                "failures": failures,
+                                "cancellation": cancellation,
+                            },
+                        )
+                        threads.append(recorder_thread)
+                        recorder_thread.start()
+
+                emit(
+                    "initialization complete: camera validated, model warm-up complete, "
+                    "display/output ready; runtime=concurrent"
+                )
+                _raise_concurrent_failure(failures, stop_requested)
+                _raise_if_concurrent_cancelled(cancellation, stop_requested)
+
+                def cancellation_predicate() -> bool:
+                    return cancellation.is_set() or stop_requested()
+
+                actuator = (
+                    _build_actuator(
+                        config,
+                        options,
+                        cancellation_requested=cancellation_predicate,
+                    )
+                    if actuator_factory is None
+                    else actuator_factory(config, options)
+                )
+                _bind_cancellation_predicate(actuator, cancellation_predicate)
+
+                now_rate = _runtime_timestamp(rate_monotonic)
+                control_schedule = MonotonicControlSchedule(
+                    config.tracking.update_rate_hz,
+                    first_deadline_s=now_rate,
+                )
+                if options.actuator_backend == "arduino_serial":
+                    _raise_if_concurrent_cancelled(cancellation, stop_requested)
+                    _hardware_method(actuator, "open")()
+                    disable_needed = True
+                    _raise_if_concurrent_cancelled(cancellation, stop_requested)
+                    emit("actuator handshake complete; sending ENABLE")
+                    _hardware_method(actuator, "enable")()
+                    _raise_if_concurrent_cancelled(cancellation, stop_requested)
+                    first_hold = controller.command_for_target(first_frame, None)
+                    emit(
+                        f"sending first hold SET pan={first_hold.pan_deg:.2f} "
+                        f"tilt={first_hold.tilt_deg:.2f}"
+                    )
+                    _apply_concurrent_command(
+                        actuator,
+                        first_hold,
+                        current_result,
+                        cancellation,
+                        stop_requested,
+                        failures,
+                        monotonic,
+                        metrics,
+                        record_session_fault=True,
+                    )
+                    control_schedule.command_completed(_runtime_timestamp(rate_monotonic))
+
+                last_rendered_sequence: int | None = None
+                while True:
+                    if stop_requested():
+                        cancellation.set()
+                        raise OperationCancelled("runtime termination requested")
+                    _raise_concurrent_failure(failures, stop_requested)
+                    if cancellation.is_set():
+                        raise OperationCancelled("concurrent runtime cancelled")
+
+                    newest = detection_channel.peek()
+                    if newest is not None and newest.version > result_version:
+                        current_result = newest.value
+                        result_version = newest.version
+
+                    stop_after_control = False
+                    if current_result.frame_sequence != last_rendered_sequence:
+                        frame = current_result.frame_packet.frame
+                        detections = current_result.detections
+                        target = selector.select(frame, detections)
+                        now = _runtime_timestamp(monotonic)
+                        frame_times.append(now)
+                        rolling_fps = _rolling_fps(frame_times)
+                        concurrent_rates = _ConcurrentRates(
+                            unique_inference_fps=(metrics.event_rate("inference").rate_hz or 0.0),
+                            display_fps=rolling_fps,
+                            control_hz=metrics.event_rate("command").rate_hz or 0.0,
+                            encoded_output_fps=(output_fps if options.output is not None else None),
+                        )
+                        error = _target_error(frame, target)
+                        zoom_transform = zoom_controller.update(
+                            frame.width,
+                            frame.height,
+                            None if target is None else target.detection,
+                        )
+                        emit(
+                            _telemetry_line(
+                                frame,
+                                detections,
+                                target,
+                                error,
+                                actuator,
+                                current_result.inference_ms,
+                                rolling_fps,
+                                current_result.resolved_device,
+                                options.actuator_backend,
+                                config.actuator.pan_limits,
+                                config.actuator.tilt_limits,
+                                zoom_transform.zoom_factor,
+                                concurrent_rates,
+                            )
+                        )
+                        if cv2 is not None:
+                            rendered = _annotate(
+                                cv2,
+                                frame,
+                                detections,
+                                target,
+                                error,
+                                actuator,
+                                current_result.inference_ms,
+                                rolling_fps,
+                                current_result.resolved_device,
+                                config.actuator.pan_limits,
+                                config.actuator.tilt_limits,
+                                zoom_transform,
+                                concurrent_rates,
+                            )
+                            if options.output is not None:
+                                render_channel.publish(_RenderedPacket(rendered, now))
+                                recorder_submitted_frames += 1
+                            if options.display:
+                                cv2.imshow("Marine PTZ Tracker", rendered)
+                                if cv2.waitKey(1) & 0xFF in {ord("q"), 27}:
+                                    metrics.record_event("display", now)
+                                    processed += 1
+                                    last_rendered_sequence = current_result.frame_sequence
+                                    cancellation.set()
+                                    break
+                        metrics.record_event("display", now)
+                        processed += 1
+                        last_rendered_sequence = current_result.frame_sequence
+                        if options.max_frames is not None and processed >= options.max_frames:
+                            stop_after_control = True
+
+                    # Inference may complete while annotation/display runs. Use
+                    # that newest result for the scheduled control update, but
+                    # leave it for the next render iteration as well.
+                    if not stop_after_control:
+                        newest = detection_channel.peek()
+                        if newest is not None and newest.version > result_version:
+                            current_result = newest.value
+                            result_version = newest.version
+
+                    now_rate = _runtime_timestamp(rate_monotonic)
+                    if control_schedule.is_due(now_rate):
+                        now = _runtime_timestamp(monotonic)
+                        result_age_s = now - current_result.inference_completed_s
+                        if result_age_s < 0.0:
+                            raise RuntimeError("monotonic clock moved backwards")
+                        if not current_result.healthy or result_age_s > freshness_s:
+                            metrics.increment_stale()
+                            raise StalePerceptionError(
+                                "latest perception result is stale or unhealthy; "
+                                "stopping SET commands and disabling actuation"
+                            )
+                        frame = current_result.frame_packet.frame
+                        target = selector.select(frame, current_result.detections)
+                        command = controller.command_for_target(frame, target)
+                        _apply_concurrent_command(
+                            actuator,
+                            command,
+                            current_result,
+                            cancellation,
+                            stop_requested,
+                            failures,
+                            monotonic,
+                            metrics,
+                            record_session_fault=(options.actuator_backend == "arduino_serial"),
+                        )
+                        # Anchor to completion, not the pre-SET deadline. A slow
+                        # acknowledgement skips missed slots and cannot cause a
+                        # burst or a second rate-limit sleep on the next SET.
+                        control_schedule.command_completed(_runtime_timestamp(rate_monotonic))
+
+                    if stop_after_control:
+                        cancellation.set()
+                        break
+
+                    wait_s = control_schedule.bounded_wait(
+                        _runtime_timestamp(rate_monotonic),
+                        0.05,
+                    )
+                    next_value = detection_channel.latest(
+                        after_version=result_version,
+                        timeout_s=wait_s,
+                    )
+                    if next_value is not None:
+                        current_result = next_value.value
+                        result_version = next_value.version
+                        continue
+                    if detection_channel.closed:
+                        if current_result.frame_sequence != last_rendered_sequence:
+                            continue
+                        break
+    except BaseException as error:
+        primary = error
+        primary_traceback = error.__traceback__
+
+    shutdown_started_s = time.monotonic()
+    cancellation.set()
+    frame_channel.close()
+    detection_channel.close()
+    render_channel.close()
+
+    if disable_needed and actuator is not None:
+        disable_needed = False
+        disable = getattr(actuator, "disable", None)
+        if callable(disable):
+            _capture_cleanup_error(disable, cleanup_errors)
+    close_actuator = getattr(actuator, "close", None)
+    if callable(close_actuator):
+        _capture_cleanup_error(close_actuator, cleanup_errors)
+
+    _join_concurrent_workers(
+        threads,
+        capture_state,
+        float(worker_join_timeout_s),
+        cleanup_errors,
+    )
+    worker_failure = failures.get()
+    if primary is None and worker_failure is not None:
+        if isinstance(worker_failure.error, OperationCancelled) and stop_requested():
+            primary = worker_failure.error
+        elif isinstance(worker_failure.error, OperationCancelled):
+            primary = UnexpectedCancellationError(
+                f"{worker_failure.stage} worker cancelled without a recorded "
+                f"termination request: {worker_failure.error}"
+            )
+            primary.__cause__ = worker_failure.error
+        else:
+            primary = RuntimeError(f"{worker_failure.stage} worker failed: {worker_failure.error}")
+            primary.__cause__ = worker_failure.error
+        primary_traceback = primary.__traceback__
+    elif (
+        primary is not None
+        and worker_failure is not None
+        and not _exception_chain_contains(primary, worker_failure.error)
+    ):
+        cleanup_errors.append(
+            RuntimeError(f"{worker_failure.stage} worker also failed: {worker_failure.error}")
+        )
+    if cv2 is not None and display_initialized:
+        destroy = getattr(cv2, "destroyAllWindows", None)
+        if callable(destroy):
+            _capture_cleanup_error(destroy, cleanup_errors)
+    shutdown_duration_s = time.monotonic() - shutdown_started_s
+
+    consumed_frames = 0 if recorder_state is None else recorder_state.consumed_frames
+    encoded_frames = 0 if recorder_state is None else recorder_state.encoded_frames
+    duplicated_frames = 0 if recorder_state is None else recorder_state.duplicated_frames
+    report = metrics.snapshot(
+        dropped_capture_frames=frame_channel.overwritten_count,
+        dropped_render_frames=detection_channel.overwritten_count,
+        recorder_submitted_frames=recorder_submitted_frames,
+        recorder_consumed_frames=consumed_frames,
+        dropped_recorder_frames=render_channel.overwritten_count,
+        encoded_frame_count=encoded_frames,
+        encoded_duplicate_frames=duplicated_frames,
+        encoded_started_s=None if recorder_state is None else recorder_state.started_s,
+        encoded_finished_s=None if recorder_state is None else recorder_state.finished_s,
+        shutdown_duration_s=shutdown_duration_s,
+        source_type=(
+            "unknown" if capture_state.metadata is None else capture_state.metadata.source_type
+        ),
+        declared_source_fps=(
+            None if capture_state.metadata is None else capture_state.metadata.declared_fps
+        ),
+        pacing_applied=(
+            False if capture_state.metadata is None else capture_state.metadata.pacing_applied
+        ),
+        capture_outcome=capture_state.outcome,
+        capture_playback_started_s=capture_state.playback_started_s,
+        detector_readiness_s=capture_state.detector_readiness_s,
+    )
+    try:
+        emit(f"runtime_metrics={json.dumps(report.to_dict(), sort_keys=True)}")
+        if metrics_sink is not None:
+            metrics_sink(report)
+    except Exception as error:
+        if primary is None:
+            primary = error
+            primary_traceback = error.__traceback__
+        else:
+            cleanup_errors.append(error)
+
+    if primary is not None:
+        if isinstance(primary, OperationCancelled) and stop_requested():
+            if cleanup_errors:
+                raise RuntimeCleanupError(
+                    f"termination requested; cleanup failed: {cleanup_errors[0]}"
+                ) from cleanup_errors[0]
+            return processed
+        if isinstance(primary, OperationCancelled):
+            unexpected = UnexpectedCancellationError(
+                f"unexpected OperationCancelled without a recorded termination request: {primary}"
+            )
+            if cleanup_errors:
+                raise RuntimeCleanupError(
+                    f"{unexpected}; cleanup also failed: {cleanup_errors[0]}"
+                ) from primary
+            raise unexpected from primary
+        if cleanup_errors:
+            raise RuntimeCleanupError(
+                f"runtime failed with {type(primary).__name__}: {primary}; "
+                f"cleanup also failed: {cleanup_errors[0]}"
+            ) from primary
+        raise primary.with_traceback(primary_traceback)
+    if cleanup_errors:
+        raise RuntimeCleanupError(
+            f"resource cleanup failed: {cleanup_errors[0]}"
+        ) from cleanup_errors[0]
+    return processed
+
+
+def _capture_worker(
+    *,
+    configured_source: int | str,
+    source_factory: Callable[..., Any],
+    channel: LatestValueChannel[FramePacket],
+    state: _CaptureWorkerState,
+    failures: WorkerFailureBox,
+    cancellation: threading.Event,
+    detector_ready: threading.Event,
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], None],
+    metrics: RuntimeMetricsCollector,
+) -> None:
+    source: Any | None = None
+    previous_sequence: int | None = None
+    published_frames = 0
+    schedule: MonotonicPlaybackSchedule | None = None
+    try:
+        source = source_factory(configured_source)
+        state.source = source
+        state.cv2 = getattr(source, "cv2", None)
+        source_type = _source_type(source, configured_source)
+        declared_fps = _source_fps(source)
+        pacing_applied = source_type == "video" and declared_fps is not None
+        state.metadata = SourceMetadata(
+            source_type,
+            _total_frames_available(source),
+            declared_fps,
+            pacing_applied,
+        )
+        state.outcome = "running"
+        while not cancellation.is_set():
+            if schedule is not None:
+                if not _wait_for_playback_deadline(
+                    schedule,
+                    cancellation,
+                    monotonic,
+                    sleep,
+                ):
+                    state.outcome = "cancelled"
+                    break
+            frame = source.read()
+            if frame is None:
+                if state.metadata.source_type == "camera" and not cancellation.is_set():
+                    raise RuntimeError("live camera source stopped without a frame")
+                state.outcome = "cancelled" if cancellation.is_set() else "normal_eof"
+                break
+            if cancellation.is_set():
+                break
+            _validate_runtime_frame(frame)
+            if previous_sequence is not None and frame.sequence <= previous_sequence:
+                raise RuntimeError("camera frame sequence must increase monotonically")
+            previous_sequence = frame.sequence
+            captured_s = _runtime_timestamp(monotonic)
+            metrics.record_event("capture", captured_s)
+            packet = FramePacket(
+                sequence=frame.sequence,
+                frame=frame,
+                captured_s=captured_s,
+                source=state.metadata,
+            )
+            try:
+                channel.publish(packet)
+            except RuntimeError:
+                if cancellation.is_set():
+                    break
+                raise
+            published_frames += 1
+            if published_frames == 1 and state.metadata.source_type != "camera":
+                while not cancellation.is_set() and not detector_ready.wait(0.05):
+                    pass
+                if cancellation.is_set():
+                    state.outcome = "cancelled"
+                    break
+                if state.metadata.pacing_applied:
+                    if state.metadata.declared_fps is None:
+                        raise RuntimeError("paced video source is missing declared FPS")
+                    playback_started_s = _runtime_timestamp(monotonic)
+                    state.playback_started_s = playback_started_s
+                    state.detector_readiness_s = playback_started_s - packet.captured_s
+                    if state.detector_readiness_s < 0.0:
+                        raise RuntimeError("monotonic clock moved backwards")
+                    schedule = MonotonicPlaybackSchedule(
+                        state.metadata.declared_fps,
+                        started_s=playback_started_s,
+                    )
+        if state.outcome == "running":
+            state.outcome = "cancelled" if cancellation.is_set() else "stopped"
+    except BaseException as error:
+        state.outcome = "capture_fault"
+        failures.record("capture", error)
+        cancellation.set()
+    finally:
+        if source is not None:
+            try:
+                source.close()
+            except BaseException as error:
+                failures.record("capture cleanup", error)
+                cancellation.set()
+        channel.close()
+
+
+def _inference_worker(
+    *,
+    options: VisionOptions,
+    detector_factory: Callable[..., Any],
+    frames: LatestValueChannel[FramePacket],
+    results: LatestValueChannel[DetectionPacket],
+    failures: WorkerFailureBox,
+    cancellation: threading.Event,
+    detector_ready: threading.Event,
+    monotonic: Callable[[], float],
+    metrics: RuntimeMetricsCollector,
+) -> None:
+    version = 0
+    try:
+        detector = detector_factory(
+            options.model,
+            device=options.device,
+            confidence_threshold=options.confidence_threshold,
+            iou_threshold=options.iou_threshold,
+            image_size=options.image_size,
+            class_names=options.target_classes,
+        )
+        first_inference = True
+        while not cancellation.is_set():
+            value = frames.latest(after_version=version, timeout_s=0.05)
+            if value is None:
+                if frames.closed:
+                    break
+                continue
+            version = value.version
+            frame_packet = value.value
+            if first_inference:
+                _synchronize_detector(detector)
+            started_s = _runtime_timestamp(monotonic)
+            detections = tuple(detector.detect(frame_packet.frame))
+            if first_inference:
+                _synchronize_detector(detector)
+            completed_s = _runtime_timestamp(monotonic)
+            if completed_s < started_s or started_s < frame_packet.captured_s:
+                raise RuntimeError("monotonic clock moved backwards")
+            metrics.record_event("inference", completed_s)
+            metrics.record_latency(
+                "capture_to_inference_start",
+                started_s - frame_packet.captured_s,
+            )
+            metrics.record_latency(
+                "capture_to_inference_complete",
+                completed_s - frame_packet.captured_s,
+            )
+            packet = DetectionPacket(
+                frame_packet=frame_packet,
+                inference_started_s=started_s,
+                inference_completed_s=completed_s,
+                detections=detections,
+                healthy=True,
+                inference_ms=float(detector.last_inference_ms),
+                resolved_device=str(detector.active_device),
+            )
+            try:
+                results.publish(packet)
+            except RuntimeError:
+                if cancellation.is_set():
+                    break
+                raise
+            if first_inference:
+                first_inference = False
+                detector_ready.set()
+    except BaseException as error:
+        failures.record("inference", error)
+        cancellation.set()
+    finally:
+        results.close()
+
+
+def _synchronize_detector(detector: Any) -> None:
+    synchronize = getattr(detector, "synchronize", None)
+    if callable(synchronize):
+        synchronize()
+
+
+def _wait_for_playback_deadline(
+    schedule: MonotonicPlaybackSchedule,
+    cancellation: threading.Event,
+    monotonic: Callable[[], float],
+    sleep: Callable[[float], None],
+) -> bool:
+    """Wait interruptibly for one frame slot and skip every missed slot."""
+    while not cancellation.is_set():
+        now = _runtime_timestamp(monotonic)
+        remaining = schedule.wait_seconds(now)
+        if remaining <= 0.0:
+            schedule.frame_started(now)
+            return True
+        sleep(min(remaining, 0.05))
+    return False
+
+
+def _recorder_worker(
+    *,
+    channel: LatestValueChannel[_RenderedPacket],
+    state: _RecorderWorkerState,
+    failures: WorkerFailureBox,
+    cancellation: threading.Event,
+) -> None:
+    version = 0
+    try:
+        while True:
+            value = channel.latest(after_version=version, timeout_s=0.05)
+            if value is None:
+                if channel.closed or cancellation.is_set():
+                    break
+                continue
+            version = value.version
+            packet = value.value
+            if state.started_s is None:
+                state.started_s = packet.timestamp_s
+            state.finished_s = packet.timestamp_s
+            state.recorder.write(packet.image, timestamp_s=packet.timestamp_s)
+    except BaseException as error:
+        failures.record("recorder", error)
+        cancellation.set()
+    finally:
+        try:
+            state.recorder.release()
+        except BaseException as error:
+            failures.record("recorder cleanup", error)
+            cancellation.set()
+        state.encoded_frames = int(state.recorder.encoded_frame_count)
+        state.duplicated_frames = int(state.recorder.duplicated_frame_count)
+        state.consumed_frames = int(state.recorder.submitted_frame_count)
+
+
+def _wait_for_channel_value(
+    channel: LatestValueChannel[Any],
+    failures: WorkerFailureBox,
+    cancellation: threading.Event,
+    stop_requested: Callable[[], bool],
+    *,
+    mark_consumed: bool = True,
+) -> Any:
+    while True:
+        if stop_requested():
+            cancellation.set()
+            raise OperationCancelled("runtime termination requested")
+        _raise_concurrent_failure(failures, stop_requested)
+        value = channel.latest(timeout_s=0.05, mark_consumed=mark_consumed)
+        if value is not None:
+            return value
+        if channel.closed:
+            _raise_concurrent_failure(failures, stop_requested)
+            return None
+
+
+def _raise_concurrent_failure(
+    failures: WorkerFailureBox,
+    stop_requested: Callable[[], bool],
+) -> None:
+    failure = failures.get()
+    if failure is None:
+        return
+    if isinstance(failure.error, OperationCancelled) and stop_requested():
+        raise failure.error
+    if isinstance(failure.error, OperationCancelled):
+        raise UnexpectedCancellationError(
+            f"{failure.stage} worker cancelled without a recorded termination "
+            f"request: {failure.error}"
+        ) from failure.error
+    raise RuntimeError(f"{failure.stage} worker failed: {failure.error}") from failure.error
+
+
+def _raise_if_concurrent_cancelled(
+    cancellation: threading.Event,
+    stop_requested: Callable[[], bool],
+) -> None:
+    if stop_requested():
+        cancellation.set()
+        raise OperationCancelled("runtime termination requested")
+    if cancellation.is_set():
+        raise OperationCancelled("concurrent runtime cancelled")
+
+
+def _apply_concurrent_command(
+    actuator: Any,
+    command: PTZCommand,
+    result: DetectionPacket,
+    cancellation: threading.Event,
+    stop_requested: Callable[[], bool],
+    failures: WorkerFailureBox,
+    monotonic: Callable[[], float],
+    metrics: RuntimeMetricsCollector,
+    *,
+    record_session_fault: bool,
+) -> None:
+    _raise_concurrent_failure(failures, stop_requested)
+    _raise_if_concurrent_cancelled(cancellation, stop_requested)
+    try:
+        actuator.apply(command)
+    except BaseException as error:
+        if record_session_fault:
+            metrics.increment_session_fault(error)
+        cancellation.set()
+        raise
+    commanded_s = _runtime_timestamp(monotonic)
+    if commanded_s < result.frame_packet.captured_s:
+        raise RuntimeError("monotonic clock moved backwards")
+    metrics.record_event("command", commanded_s)
+    metrics.record_latency(
+        "result_age_at_control",
+        commanded_s - result.inference_completed_s,
+    )
+    metrics.record_latency(
+        "capture_to_command",
+        commanded_s - result.frame_packet.captured_s,
+    )
+
+
+def _join_concurrent_workers(
+    threads: Sequence[threading.Thread],
+    capture_state: _CaptureWorkerState,
+    timeout_s: float,
+    errors: list[Exception],
+) -> None:
+    started_s = time.monotonic()
+    initial_deadline = started_s + timeout_s / 2.0
+    for thread in threads:
+        remaining = max(0.0, initial_deadline - time.monotonic())
+        thread.join(remaining)
+    alive = [thread for thread in threads if thread.is_alive()]
+    if alive and capture_state.source is not None:
+        # OpenCV release is the bounded shutdown escape hatch for a capture
+        # read that did not observe cancellation. The capture worker remains
+        # the only context that calls read().
+        try:
+            capture_state.source.close()
+        except Exception as error:
+            errors.append(error)
+        final_deadline = started_s + timeout_s
+        for thread in alive:
+            remaining = max(0.0, final_deadline - time.monotonic())
+            thread.join(remaining)
+        alive = [thread for thread in alive if thread.is_alive()]
+    if alive:
+        errors.append(
+            RuntimeError(
+                "worker join deadline expired: " + ", ".join(thread.name for thread in alive)
+            )
+        )
+
+
 def _raise_primary_with_secondary_failures(
     primary: BaseException,
     primary_traceback: TracebackType | None,
@@ -527,6 +1542,17 @@ def _raise_primary_with_secondary_failures(
         cleanup_errors=cleanup_errors,
     )
     raise primary.with_traceback(primary_traceback) from diagnostic
+
+
+def _exception_chain_contains(error: BaseException, target: BaseException) -> bool:
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        if current is target:
+            return True
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return False
 
 
 def _capture_cleanup_error(
@@ -564,6 +1590,20 @@ def _total_frames_available(source: Any) -> int | None:
     return None
 
 
+def _source_fps(source: Any) -> float | None:
+    value = getattr(source, "fps", None)
+    if value is None:
+        return None
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+    ):
+        raise RuntimeError("source FPS must be a finite positive number")
+    return float(value)
+
+
 def _bind_cancellation_predicate(
     actuator: Any,
     stop_requested: Callable[[], bool],
@@ -574,6 +1614,20 @@ def _bind_cancellation_predicate(
 
 
 def _validate_options(config: AppConfig, options: VisionOptions) -> None:
+    if options.runtime_mode not in {"single", "concurrent"}:
+        raise ValueError("runtime mode must be single or concurrent")
+    freshness = (
+        config.runtime.result_freshness_s
+        if options.result_freshness_s is None
+        else options.result_freshness_s
+    )
+    if (
+        isinstance(freshness, bool)
+        or not isinstance(freshness, Real)
+        or not math.isfinite(float(freshness))
+        or float(freshness) <= 0.0
+    ):
+        raise ValueError("result freshness must be a finite positive number")
     if isinstance(options.source, bool):
         raise ValueError("source camera index must not be bool")
     if isinstance(options.source, int):
@@ -584,8 +1638,7 @@ def _validate_options(config: AppConfig, options: VisionOptions) -> None:
     if not isinstance(options.model, str) or not options.model.strip():
         raise ValueError("model must be a non-empty name or local path")
     if not options.target_classes or any(
-        not isinstance(name, str) or not name.strip()
-        for name in options.target_classes
+        not isinstance(name, str) or not name.strip() for name in options.target_classes
     ):
         raise ValueError("at least one non-empty target class is required")
     _probability(options.confidence_threshold, "confidence")
@@ -604,6 +1657,16 @@ def _validate_options(config: AppConfig, options: VisionOptions) -> None:
         raise ValueError("max_frames must be greater than zero when provided")
     if options.output is not None and options.output.exists() and options.output.is_dir():
         raise ValueError("output path must name a file, not a directory")
+    if not isinstance(options.digital_zoom, bool):
+        raise ValueError("digital zoom must be bool")
+    if (
+        isinstance(options.max_digital_zoom, bool)
+        or not isinstance(options.max_digital_zoom, Real)
+        or not math.isfinite(float(options.max_digital_zoom))
+        or float(options.max_digital_zoom) < 1.0
+    ):
+        raise ValueError("maximum digital zoom must be finite and at least 1.0")
+    _output_fps(config, options)
     if options.actuator_backend not in {"simulated", "arduino_serial"}:
         raise ValueError("actuator backend must be simulated or arduino_serial")
     if options.actuator_backend == "simulated":
@@ -621,6 +1684,10 @@ def _validate_options(config: AppConfig, options: VisionOptions) -> None:
         raise ValueError("Arduino actuation requires explicit --arm-hardware")
     if config.serial is None:
         raise ConfigError("Arduino actuation requires a validated serial section")
+    if float(freshness) >= config.serial.watchdog_timeout_s:
+        raise ValueError(
+            "result freshness must be less than the configured firmware watchdog timeout"
+        )
     _resolved_serial_port(config, options)
 
 
@@ -631,6 +1698,18 @@ def _probability(value: object, field_name: str) -> float:
     if not math.isfinite(number) or not 0.0 <= number <= 1.0:
         raise ValueError(f"{field_name} must be finite and between 0 and 1")
     return number
+
+
+def _output_fps(config: AppConfig, options: VisionOptions) -> float:
+    value = config.camera.fps if options.output_fps is None else options.output_fps
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not math.isfinite(float(value))
+        or float(value) <= 0.0
+    ):
+        raise ValueError("encoded output FPS must be a finite positive number")
+    return float(value)
 
 
 def _resolved_serial_port(config: AppConfig, options: VisionOptions) -> str:
@@ -677,9 +1756,7 @@ def _build_actuator(
 def _hardware_method(actuator: Any, method_name: str) -> Callable[[], Any]:
     method = getattr(actuator, method_name, None)
     if not callable(method):
-        raise TypeError(
-            f"Arduino actuator must provide callable {method_name}()"
-        )
+        raise TypeError(f"Arduino actuator must provide callable {method_name}()")
     return method
 
 
@@ -748,14 +1825,40 @@ def _telemetry_line(
     fps: float,
     device: str,
     actuator_backend: str,
+    pan_limits: AngleLimits,
+    tilt_limits: AngleLimits,
+    digital_zoom: float = 1.0,
+    concurrent_rates: _ConcurrentRates | None = None,
 ) -> str:
     target_text = "none" if target is None else target.detection.label
     error_text = "none" if error is None else f"{error[0]:.1f},{error[1]:.1f}"
+    physical_pan, physical_tilt = _physical_angles(actuator)
+    physical_pan_text = "n/a" if physical_pan is None else f"{physical_pan:.0f}"
+    physical_tilt_text = "n/a" if physical_tilt is None else f"{physical_tilt:.0f}"
+    rate_text = (
+        f"fps={fps:.1f}"
+        if concurrent_rates is None
+        else (
+            f"unique_inference_fps={concurrent_rates.unique_inference_fps:.1f} "
+            f"display_fps={concurrent_rates.display_fps:.1f} "
+            f"control_hz={concurrent_rates.control_hz:.1f} "
+            "encoded_output_fps="
+            + (
+                "n/a"
+                if concurrent_rates.encoded_output_fps is None
+                else f"{concurrent_rates.encoded_output_fps:.1f}"
+            )
+        )
+    )
     return (
         f"seq={frame.sequence:06d} detections={len(detections)} target={target_text} "
-        f"error_px={error_text} pan={actuator.pan_deg:.2f} tilt={actuator.tilt_deg:.2f} "
-        f"inference_ms={inference_ms:.1f} fps={fps:.1f} device={device} "
-        f"actuator={actuator_backend}"
+        f"error_px={error_text} logical_pan={actuator.pan_deg:.2f} "
+        f"logical_tilt={actuator.tilt_deg:.2f} physical_pan={physical_pan_text} "
+        f"physical_tilt={physical_tilt_text} "
+        f"saturation_pan={_axis_saturation(actuator.pan_deg, pan_limits)} "
+        f"saturation_tilt={_axis_saturation(actuator.tilt_deg, tilt_limits)} "
+        f"inference_ms={inference_ms:.1f} {rate_text} device={device} "
+        f"actuator={actuator_backend} digital_zoom={digital_zoom:.2f}x"
     )
 
 
@@ -769,15 +1872,34 @@ def _annotate(
     inference_ms: float,
     fps: float,
     device: str,
+    pan_limits: AngleLimits,
+    tilt_limits: AngleLimits,
+    zoom_transform: ZoomTransform | None = None,
+    concurrent_rates: _ConcurrentRates | None = None,
 ) -> Any:
     if frame.image is None:
         raise ValueError("cannot annotate a frame without an image")
-    rendered = frame.image.copy()
+    transform = zoom_transform or identity_transform(frame.width, frame.height)
+    if transform.is_identity:
+        rendered = frame.image.copy()
+    else:
+        cropped = frame.image[
+            transform.crop_top : transform.crop_bottom,
+            transform.crop_left : transform.crop_right,
+        ]
+        rendered = cv2.resize(
+            cropped,
+            (frame.width, frame.height),
+            interpolation=cv2.INTER_LINEAR,
+        )
     selected = target.detection if target is not None else None
     for detection in detections:
+        box = transform.transform_box(detection)
+        if box is None:
+            continue
         color = (0, 255, 255) if detection == selected else (0, 200, 0)
-        start = (round(detection.left), round(detection.top))
-        end = (round(detection.right), round(detection.bottom))
+        start = (round(box[0]), round(box[1]))
+        end = (round(box[2]), round(box[3]))
         cv2.rectangle(rendered, start, end, color, 2)
         cv2.putText(
             rendered,
@@ -790,18 +1912,60 @@ def _annotate(
             cv2.LINE_AA,
         )
 
-    frame_center = (round(frame.width / 2), round(frame.height / 2))
-    cv2.drawMarker(rendered, frame_center, (255, 255, 255), cv2.MARKER_CROSS, 18, 2)
+    full_center_values = transform.transform_point(frame.width / 2, frame.height / 2)
+    full_center = tuple(round(value) for value in full_center_values)
+    full_center_visible = 0 <= full_center[0] < frame.width and 0 <= full_center[1] < frame.height
+    if full_center_visible:
+        cv2.drawMarker(rendered, full_center, (255, 255, 255), cv2.MARKER_CROSS, 18, 2)
+    crop_center = (round(frame.width / 2), round(frame.height / 2))
+    cv2.drawMarker(rendered, crop_center, (255, 0, 255), cv2.MARKER_CROSS, 12, 1)
     if target is not None:
-        target_center = tuple(round(value) for value in target.detection.center)
+        target_x, target_y = transform.transform_point(*target.detection.center)
+        target_center = (
+            round(min(frame.width - 1, max(0.0, target_x))),
+            round(min(frame.height - 1, max(0.0, target_y))),
+        )
         cv2.drawMarker(rendered, target_center, (0, 255, 255), cv2.MARKER_CROSS, 18, 2)
-        cv2.line(rendered, frame_center, target_center, (0, 255, 255), 1)
+        if full_center_visible:
+            cv2.line(rendered, full_center, target_center, (0, 255, 255), 1)
 
     error_text = "none" if error is None else f"({error[0]:.1f}, {error[1]:.1f}) px"
+    physical_pan, physical_tilt = _physical_angles(actuator)
+    physical_text = (
+        "physical pan=n/a tilt=n/a"
+        if physical_pan is None or physical_tilt is None
+        else f"physical pan={physical_pan:.0f} tilt={physical_tilt:.0f}"
+    )
+    rate_text = (
+        f"fps={fps:.1f}"
+        if concurrent_rates is None
+        else (
+            f"unique_inference_fps={concurrent_rates.unique_inference_fps:.1f}  "
+            f"display_fps={concurrent_rates.display_fps:.1f}  "
+            f"control_hz={concurrent_rates.control_hz:.1f}  "
+            "encoded_output_fps="
+            + (
+                "n/a"
+                if concurrent_rates.encoded_output_fps is None
+                else f"{concurrent_rates.encoded_output_fps:.1f}"
+            )
+        )
+    )
     lines = (
-        f"PTZ pan={actuator.pan_deg:.2f} tilt={actuator.tilt_deg:.2f}",
+        f"tracking={'locked' if target is not None else 'lost'}",
+        (
+            "target_confidence=none"
+            if target is None
+            else f"target_confidence={target.detection.confidence:.2f}"
+        ),
+        f"logical pan={actuator.pan_deg:.2f} tilt={actuator.tilt_deg:.2f}",
+        physical_text,
+        f"saturation pan={_axis_saturation(actuator.pan_deg, pan_limits)} "
+        f"tilt={_axis_saturation(actuator.tilt_deg, tilt_limits)}",
         f"error={error_text}",
-        f"inference={inference_ms:.1f} ms  fps={fps:.1f}  device={device}",
+        f"inference={inference_ms:.1f} ms  {rate_text}  device={device}",
+        f"digital_zoom={transform.zoom_factor:.2f}x (software)",
+        "centers: full=white crop=magenta target=yellow",
     )
     for index, text in enumerate(lines):
         cv2.putText(
@@ -815,6 +1979,25 @@ def _annotate(
             cv2.LINE_AA,
         )
     return rendered
+
+
+def _physical_angles(actuator: Any) -> tuple[float | None, float | None]:
+    values: list[float | None] = []
+    for name in ("physical_pan_deg", "physical_tilt_deg"):
+        value = getattr(actuator, name, None)
+        if isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(float(value)):
+            values.append(float(value))
+        else:
+            values.append(None)
+    return values[0], values[1]
+
+
+def _axis_saturation(value: float, limits: AngleLimits) -> str:
+    if value <= limits.minimum_deg:
+        return "min"
+    if value >= limits.maximum_deg:
+        return "max"
+    return "none"
 
 
 def _open_writer(
@@ -842,23 +2025,20 @@ def _open_writer(
             writer.release()
         except Exception:
             pass
-        raise RuntimeError(
-            f"unable to inspect annotated video output {output}: {exc}"
-        ) from exc
+        raise RuntimeError(f"unable to inspect annotated video output {output}: {exc}") from exc
     if not opened:
         writer.release()
         raise RuntimeError(f"unable to open annotated video output {output}")
-    return writer
+    try:
+        return WallClockVideoRecorder(writer, fps)
+    except Exception:
+        writer.release()
+        raise
 
 
 def _target_classes(values: Sequence[str] | None, defaults: Sequence[str]) -> tuple[str, ...]:
     raw = values if values else defaults
-    classes = tuple(
-        name.strip()
-        for value in raw
-        for name in value.split(",")
-        if name.strip()
-    )
+    classes = tuple(name.strip() for value in raw for name in value.split(",") if name.strip())
     if not classes:
         raise ValueError("at least one target class is required")
     return classes
@@ -893,6 +2073,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--display", action="store_true")
     parser.add_argument("--output", type=Path, help="annotated video output path")
     parser.add_argument(
+        "--output-fps",
+        type=float,
+        help="fixed encoded video FPS; defaults to configured camera FPS",
+    )
+    parser.add_argument(
+        "--digital-zoom",
+        action="store_true",
+        help="enable target-following software crop in display/output only",
+    )
+    parser.add_argument(
+        "--max-digital-zoom",
+        type=float,
+        default=2.0,
+        help="maximum software crop magnification (default: 2.0)",
+    )
+    parser.add_argument(
         "--actuator-backend",
         choices=("simulated", "arduino_serial"),
         help=(
@@ -911,8 +2107,21 @@ def _parser() -> argparse.ArgumentParser:
         "--arm-hardware",
         action="store_true",
         help=(
-            "explicitly allow ENABLE after camera, model, controller, and serial "
-            "handshake initialization"
+            "explicitly allow ENABLE after camera validation, first inference, "
+            "display/output setup, and serial handshake"
+        ),
+    )
+    parser.add_argument(
+        "--runtime-mode",
+        choices=("single", "concurrent"),
+        help="execution topology; defaults to runtime.execution_mode from configuration",
+    )
+    parser.add_argument(
+        "--result-freshness",
+        type=float,
+        help=(
+            "maximum concurrent detection-result age in seconds; defaults to "
+            "runtime.result_freshness_s"
         ),
     )
     return parser
@@ -923,9 +2132,7 @@ def _source_option(cli_value: str | None, config: AppConfig) -> int | str:
         return parse_source_argument(cli_value)
     value = config.camera.device
     if value is None:
-        raise ValueError(
-            "--source is required when camera.device is absent from configuration"
-        )
+        raise ValueError("--source is required when camera.device is absent from configuration")
     if config.camera.source == "v4l2" and value.startswith("/dev/video"):
         index = value.removeprefix("/dev/video")
         if index.isdecimal():
@@ -975,13 +2182,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.confidence is not None
                 else config.detection.confidence_threshold
             ),
-            iou_threshold=(
-                args.iou if args.iou is not None else config.detection.iou_threshold
-            ),
+            iou_threshold=(args.iou if args.iou is not None else config.detection.iou_threshold),
             image_size=(
-                args.image_size
-                if args.image_size is not None
-                else config.detection.image_size
+                args.image_size if args.image_size is not None else config.detection.image_size
             ),
             max_frames=args.max_frames,
             display=args.display,
@@ -993,6 +2196,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             ),
             serial_port=args.serial_port,
             arm_hardware=args.arm_hardware,
+            digital_zoom=args.digital_zoom,
+            max_digital_zoom=args.max_digital_zoom,
+            output_fps=args.output_fps,
+            runtime_mode=args.runtime_mode or config.runtime.execution_mode,
+            result_freshness_s=args.result_freshness,
         )
         with _termination_signals() as termination:
             run_vision(config, options, stop_requested=termination)

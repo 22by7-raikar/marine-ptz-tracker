@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import math
+import statistics
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import math
 from pathlib import Path
-import statistics
-import time
 from typing import Any
 
 from .benchmark import (
@@ -30,11 +30,8 @@ from .vision_cli import (
     run_vision,
 )
 
-
 REPLAY_SCHEMA_VERSION = 1
-_PATH_ARGUMENTS = frozenset(
-    {"--source", "--model", "--config", "--report", "--annotated-output"}
-)
+_PATH_ARGUMENTS = frozenset({"--source", "--model", "--config", "--report", "--annotated-output"})
 
 
 class ReplayError(ValueError):
@@ -278,9 +275,7 @@ class ReplayReport:
                     "absolute_euclidean": absolute_error,
                 },
                 "simulated_actuator_command_count": self.command_count,
-                "effective_command_rate_hz": _rate(
-                    self.command_count, self.processing_elapsed_s
-                ),
+                "effective_command_rate_hz": _rate(self.command_count, self.processing_elapsed_s),
                 "resulting_pan_saturation_count": self.pan_saturation_count,
                 "resulting_tilt_saturation_count": self.tilt_saturation_count,
                 "final_pan_deg": self.final_pan_deg,
@@ -631,7 +626,9 @@ def sanitize_replay_command(command: Sequence[str]) -> tuple[str, ...]:
             if name in _PATH_ARGUMENTS:
                 sanitized.append(f"{name}={local_path_marker(value)}")
                 continue
-        sanitized.append(_sanitize_replay_path(generic_value) if _looks_local_path(raw) else generic_value)
+        sanitized.append(
+            _sanitize_replay_path(generic_value) if _looks_local_path(raw) else generic_value
+        )
     return tuple(sanitized)
 
 
@@ -650,11 +647,7 @@ def _looks_local_path(value: str) -> bool:
         return True
     if "://" in value:
         return False
-    return (
-        value.startswith(("/", "./", "../", "~", "\\"))
-        or "/" in value
-        or "\\" in value
-    )
+    return value.startswith(("/", "./", "../", "~", "\\")) or "/" in value or "\\" in value
 
 
 def _sanitize_environment(values: Mapping[str, object]) -> dict[str, object]:

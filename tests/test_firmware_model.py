@@ -1,26 +1,26 @@
 from __future__ import annotations
 
-from pathlib import Path
 import re
+from pathlib import Path
 
 from marine_ptz.config import load_config
 from marine_ptz.firmware_model import (
     COMMANDS_PER_LOOP,
+    RX_BYTES_PER_LOOP,
+    TX_BYTES_PER_LOOP,
     FirmwareRuntimeModel,
     FirmwareSafetyConfig,
     FirmwareStateMachine,
-    RX_BYTES_PER_LOOP,
-    TX_BYTES_PER_LOOP,
     millis_add,
     millis_deadline_reached,
 )
 from marine_ptz.serial_protocol import (
+    MAX_SEQUENCE,
     AckResponse,
     EnableCommand,
     ErrorCode,
     ErrorResponse,
     HelloCommand,
-    MAX_SEQUENCE,
     ReadyResponse,
     SetCommand,
     StatusCommand,
@@ -248,9 +248,7 @@ def test_pending_output_is_emitted_incrementally_before_next_command() -> None:
         if not runtime.pending_output and runtime.queued_rx_bytes == 0:
             break
 
-    assert b"".join(pieces) == (
-        b"READY 1 1 0.1.0\r\nREADY 2 1 0.1.0\r\n"
-    )
+    assert b"".join(pieces) == (b"READY 1 1 0.1.0\r\nREADY 2 1 0.1.0\r\n")
     assert queued_while_pending
     assert max(queued_while_pending) > 0
 
@@ -280,9 +278,7 @@ def test_unsigned_millis_deadline_comparison_handles_wraparound() -> None:
 def test_firmware_constants_agree_with_checked_in_hardware_config() -> None:
     config = load_config("configs/hardware.yaml")
     assert config.serial is not None
-    header = Path("firmware/ptz_controller/protocol_config.h").read_text(
-        encoding="utf-8"
-    )
+    header = Path("firmware/ptz_controller/protocol_config.h").read_text(encoding="utf-8")
 
     expected = {
         "SERIAL_BAUD_RATE": config.serial.baudrate,

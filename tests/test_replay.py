@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError, replace
-from datetime import datetime, timezone
 import math
 import os
-from pathlib import Path
 import signal
+from dataclasses import FrozenInstanceError, replace
+from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Mapping
 
 import pytest
 
+import marine_ptz.benchmark as benchmark
 import marine_ptz.replay as replay
 import marine_ptz.replay_cli as replay_cli
-import marine_ptz.benchmark as benchmark
 import marine_ptz.vision_cli as vision_cli
 from marine_ptz.config import load_config
 from marine_ptz.replay import (
@@ -409,7 +409,12 @@ def test_cli_rejects_live_hardware_and_colliding_paths_without_running(
     monkeypatch.setattr(replay_cli, "run_replay", fake_run)
     assert replay_cli.main(["--source", "camera:0", "--report", str(tmp_path / "r.json")]) == 2
     assert replay_cli.main(["--source", str(input_path), "--report", str(input_path)]) == 2
-    assert replay_cli.main(["--source", str(input_path), "--report", str(tmp_path / "r.json"), "--arm-hardware"]) == 2
+    assert (
+        replay_cli.main(
+            ["--source", str(input_path), "--report", str(tmp_path / "r.json"), "--arm-hardware"]
+        )
+        == 2
+    )
     assert invoked is False
 
 
@@ -419,9 +424,18 @@ def test_cli_requires_explicit_replay_safe_for_hardware_config(
 ) -> None:
     input_path = tmp_path / "input.mp4"
     input_path.write_bytes(b"fixture")
-    monkeypatch.setattr(replay_cli, "run_replay", lambda *_args, **_kwargs: SimpleNamespace(accepted=None))
+    monkeypatch.setattr(
+        replay_cli, "run_replay", lambda *_args, **_kwargs: SimpleNamespace(accepted=None)
+    )
 
-    command = ["--config", "configs/hardware.yaml", "--source", str(input_path), "--report", str(tmp_path / "r.json")]
+    command = [
+        "--config",
+        "configs/hardware.yaml",
+        "--source",
+        str(input_path),
+        "--report",
+        str(tmp_path / "r.json"),
+    ]
     assert replay_cli.main(command) == 2
     assert replay_cli.main([*command, "--replay-safe"]) == 0
 
@@ -454,7 +468,10 @@ def test_cli_cancellation_preserves_signal_exit_status(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(ReplayCancelled("cancelled")),
     )
 
-    assert replay_cli.main(["--source", str(input_path), "--report", str(tmp_path / "r.json")]) == expected
+    assert (
+        replay_cli.main(["--source", str(input_path), "--report", str(tmp_path / "r.json")])
+        == expected
+    )
 
 
 def test_complete_report_sanitizes_all_local_paths_and_preserves_safe_models(
@@ -638,11 +655,17 @@ def test_replay_path_forced_url_values_keep_only_safe_url_path_basenames(
 def test_replay_report_path_typed_urls_never_retain_url_structure(
     tmp_path: Path,
 ) -> None:
-    model_url = "https://model-user:model-pass@models.example/private/custom.pt?token=secret#fragment"
-    source_url = "https://source-user:source-pass@sources.example/private/frame.png?token=secret#fragment"
+    model_url = (
+        "https://model-user:model-pass@models.example/private/custom.pt?token=secret#fragment"
+    )
+    source_url = (
+        "https://source-user:source-pass@sources.example/private/frame.png?token=secret#fragment"
+    )
     report_url = "file:///home/alice/private/result.json?%74oken=%73ecret#fragment"
     config_url = "https://configs.example"
-    annotated_url = "https://output-user:output-pass@outputs.example/private/annotated.mp4?key=secret#fragment"
+    annotated_url = (
+        "https://output-user:output-pass@outputs.example/private/annotated.mp4?key=secret#fragment"
+    )
     report = replace(
         _report_for_path_privacy(tmp_path),
         command=(
@@ -773,20 +796,32 @@ def test_immutable_observer_events_contain_only_snapshots_and_cannot_mutate(
     processed = vision_cli.run_vision(
         load_config("configs/development.yaml"),
         vision_cli.VisionOptions(
-            source="fixture.mp4", model="local.pt", device="cpu", target_classes=("boat",),
-            confidence_threshold=0.5, iou_threshold=0.45, image_size=320,
-            max_frames=None, display=False, output=None,
+            source="fixture.mp4",
+            model="local.pt",
+            device="cpu",
+            target_classes=("boat",),
+            confidence_threshold=0.5,
+            iou_threshold=0.45,
+            image_size=320,
+            max_frames=None,
+            display=False,
+            output=None,
         ),
         source_factory=lambda _source: source,
         detector_factory=lambda *_args, **_kwargs: detector,
-        actuator_factory=lambda config, _options: actuator.append(
-            vision_cli.SimulatedPTZActuator(
-                config.actuator.pan_limits, config.actuator.tilt_limits,
-                initial_pan_deg=config.actuator.initial_pan_deg,
-                initial_tilt_deg=config.actuator.initial_tilt_deg,
+        actuator_factory=lambda config, _options: (
+            actuator.append(
+                vision_cli.SimulatedPTZActuator(
+                    config.actuator.pan_limits,
+                    config.actuator.tilt_limits,
+                    initial_pan_deg=config.actuator.initial_pan_deg,
+                    initial_tilt_deg=config.actuator.initial_tilt_deg,
+                )
             )
-        ) or actuator[0],
-        observer=observer, emit=lambda _line: None,
+            or actuator[0]
+        ),
+        observer=observer,
+        emit=lambda _line: None,
     )
 
     assert processed == 1
@@ -1127,11 +1162,21 @@ def test_processing_end_precedes_cleanup_for_non_eof_outcomes(
     source = SlowCloseSource([frame(0), None])
     observer = SnapshotObserver()
     detector: FakeDetector
-    stop_requested = lambda: False
+
+    def stop_requested() -> bool:
+        return False
+
     options_value = vision_cli.VisionOptions(
-        source="fixture.mp4", model="local.pt", device="cpu", target_classes=("boat",),
-        confidence_threshold=0.5, iou_threshold=0.45, image_size=320,
-        max_frames=1 if outcome == "max_frames" else None, display=False, output=None,
+        source="fixture.mp4",
+        model="local.pt",
+        device="cpu",
+        target_classes=("boat",),
+        confidence_threshold=0.5,
+        iou_threshold=0.45,
+        image_size=320,
+        max_frames=1 if outcome == "max_frames" else None,
+        display=False,
+        output=None,
     )
     if outcome == "failure":
         detector = FakeDetector([RuntimeError("detector failure")])
@@ -1146,15 +1191,26 @@ def test_processing_end_precedes_cleanup_for_non_eof_outcomes(
                 return super().detect(value)
 
         detector = CancellingDetector([()])
-        stop_requested = lambda: state["stop"]
 
-    with pytest.raises(RuntimeError, match="detector failure") if outcome == "failure" else _does_not_raise():
+        def stop_requested() -> bool:
+            return state["stop"]
+
+    with (
+        pytest.raises(RuntimeError, match="detector failure")
+        if outcome == "failure"
+        else _does_not_raise()
+    ):
         vision_cli.run_vision(
-            load_config("configs/development.yaml"), options_value,
+            load_config("configs/development.yaml"),
+            options_value,
             source_factory=lambda _source: source,
             detector_factory=lambda *_args, **_kwargs: detector,
-            monotonic=clock, rate_monotonic=lambda: 1.0, sleep=lambda _seconds: None,
-            stop_requested=stop_requested, observer=observer, emit=lambda _line: None,
+            monotonic=clock,
+            rate_monotonic=lambda: 1.0,
+            sleep=lambda _seconds: None,
+            stop_requested=stop_requested,
+            observer=observer,
+            emit=lambda _line: None,
         )
     assert isinstance(observer.processing_end, vision_cli.RuntimeProcessingEndEvent)
     assert observer.processing_end.exit_reason == ("failure" if outcome == "failure" else outcome)
@@ -1181,12 +1237,18 @@ def test_atomic_replay_write_failures_preserve_existing_report(
     report_path.write_text('{"previous": true}\n', encoding="utf-8")
     if failure == "write":
         monkeypatch.setattr(
-            benchmark, "_write_serialized_report", lambda *_args: (_ for _ in ()).throw(OSError("write failed"))
+            benchmark,
+            "_write_serialized_report",
+            lambda *_args: (_ for _ in ()).throw(OSError("write failed")),
         )
     elif failure == "fsync":
-        monkeypatch.setattr(benchmark.os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("fsync failed")))
+        monkeypatch.setattr(
+            benchmark.os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("fsync failed"))
+        )
     else:
-        monkeypatch.setattr(benchmark.os, "replace", lambda *_args: (_ for _ in ()).throw(OSError("replace failed")))
+        monkeypatch.setattr(
+            benchmark.os, "replace", lambda *_args: (_ for _ in ()).throw(OSError("replace failed"))
+        )
 
     with pytest.raises(OSError):
         run_fake(tmp_path, [frame(0), None], [()])
@@ -1213,20 +1275,32 @@ def test_passive_observer_does_not_change_production_loop_result() -> None:
         processed = vision_cli.run_vision(
             load_config("configs/development.yaml"),
             vision_cli.VisionOptions(
-                source="fixture.mp4", model="local.pt", device="cpu", target_classes=("boat",),
-                confidence_threshold=0.5, iou_threshold=0.45, image_size=320,
-                max_frames=None, display=False, output=None,
+                source="fixture.mp4",
+                model="local.pt",
+                device="cpu",
+                target_classes=("boat",),
+                confidence_threshold=0.5,
+                iou_threshold=0.45,
+                image_size=320,
+                max_frames=None,
+                display=False,
+                output=None,
             ),
             source_factory=lambda _source: source,
             detector_factory=lambda *_args, **_kwargs: FakeDetector([(boat(),)]),
-            actuator_factory=lambda config, _options: actuator.append(
-                vision_cli.SimulatedPTZActuator(
-                    config.actuator.pan_limits, config.actuator.tilt_limits,
-                    initial_pan_deg=config.actuator.initial_pan_deg,
-                    initial_tilt_deg=config.actuator.initial_tilt_deg,
+            actuator_factory=lambda config, _options: (
+                actuator.append(
+                    vision_cli.SimulatedPTZActuator(
+                        config.actuator.pan_limits,
+                        config.actuator.tilt_limits,
+                        initial_pan_deg=config.actuator.initial_pan_deg,
+                        initial_tilt_deg=config.actuator.initial_tilt_deg,
+                    )
                 )
-            ) or actuator[0],
-            observer=observer, emit=lambda _line: None,
+                or actuator[0]
+            ),
+            observer=observer,
+            emit=lambda _line: None,
         )
         selected = actuator[0]
         return processed, selected.pan_deg, selected.tilt_deg  # type: ignore[union-attr]

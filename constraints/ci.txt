@@ -1,7 +1,9 @@
 # Reviewed lightweight CI constraints from the verified Python 3.11 environment.
 # This is not a hash-locked supply-chain lockfile.
+setuptools==78.1.0
 PyYAML==6.0.3
 pytest==9.1.1
+ruff==0.16.0
 iniconfig==2.3.0
 packaging==26.0
 pluggy==1.6.0
