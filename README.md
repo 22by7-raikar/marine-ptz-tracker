@@ -6,6 +6,14 @@ Laptop-driven system for detecting and following a small marine target with a
 USB camera, a two-servo pan/tilt assembly, and an Arduino Uno. The laptop owns
 perception and control; the Uno is the bounded servo-command safety boundary.
 
+## Demo
+
+https://github.com/user-attachments/assets/c84c46f1-63f1-40c4-8cee-3291b3216307
+
+<p align="center">
+  <em>Demonstration of PTZ tracking at my desk.</em>
+</p>
+
 Containerized CPU verification, headless GPU replay, the explicitly armed
 hardware template, release manifests, deployment verification, incident
 response, and exact rollback procedures are documented in
@@ -35,6 +43,14 @@ docker compose -f compose.hardware.yaml --profile hardware run --rm hardware
 The laptop owns capture, detection, target selection, control, telemetry, and serial communication. The Arduino only validates bounded pan/tilt commands and drives the servos. Hardware is intentionally not accessed at import time.
 
 ## Current validation status
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/c904ab8d-e728-4e43-b2c8-b1605a0e0fcc"
+       alt="Hadrware Setup"
+       width="400"><br>
+  <em>Hardware Setup.</em>
+</p>
+
 
 The hardware-independent synthetic slice and the unified OpenCV + Ultralytics
 runtime are implemented. The runtime reads a camera or finite media source,
