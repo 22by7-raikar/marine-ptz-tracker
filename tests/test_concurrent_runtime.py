@@ -370,7 +370,15 @@ def test_normal_eof_drains_final_inflight_result_and_recorder(tmp_path: Path) ->
             return super().detect(value)
 
     source = DrainSource([frame(0), frame(1), None], fps=30.0)
-    reports: list[Any] = []
+    writer = FailingWriter()
+    source.cv2 = FakeCV2(writer)
+
+    class Reports(list[Any]):
+        def append(self, report: Any) -> None:
+            assert writer.released is True
+            super().append(report)
+
+    reports: list[Any] = Reports()
     telemetry: list[str] = []
     processed = run_fake(
         load_config("configs/development.yaml"),
@@ -392,6 +400,7 @@ def test_normal_eof_drains_final_inflight_result_and_recorder(tmp_path: Path) ->
     assert reports[0].display.count == processed
     assert reports[0].recorder_submitted_frames == processed
     assert reports[0].recorder_consumed_frames == processed
+    assert reports[0].dropped_recorder_frames == 0
     frame_lines = [line for line in telemetry if line.startswith("seq=")]
     assert frame_lines[-1].startswith("seq=000001 ")
 
