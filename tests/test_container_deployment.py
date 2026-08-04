@@ -6,6 +6,7 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path, PurePosixPath
 
@@ -43,8 +44,11 @@ def test_container_has_cpu_test_and_headless_runtime_targets() -> None:
 
 def test_entrypoint_creates_yolo_settings_tree_before_python_imports(
     tmp_path: Path,
+    request: pytest.FixtureRequest,
 ) -> None:
-    config_directory = tmp_path / "ultralytics"
+    config_root = tempfile.TemporaryDirectory(prefix="marine-ptz-yolo-", dir="/tmp")
+    request.addfinalizer(config_root.cleanup)
+    config_directory = Path(config_root.name) / "ultralytics"
     artifact_directory = tmp_path / "artifacts"
     artifact_directory.mkdir()
     artifact_directory.chmod(0o2770)
