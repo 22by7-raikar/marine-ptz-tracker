@@ -18,6 +18,7 @@ from marine_ptz.concurrent_runtime import (
     summarize_distribution,
 )
 from marine_ptz.config import AppConfig, load_config
+from marine_ptz.evaluation import ClosedLoopMetricsCollector
 from marine_ptz.types import Detection, Frame, PTZCommand
 from marine_ptz.vision_cli import (
     StalePerceptionError,
@@ -218,6 +219,7 @@ def run_fake(
     sleep: Callable[[float], None] | None = None,
     stop_requested: Callable[[], bool] = lambda: False,
     metrics: list[Any] | None = None,
+    evaluation: ClosedLoopMetricsCollector | None = None,
     emit: Callable[[str], None] = lambda _line: None,
 ) -> int:
     kwargs: dict[str, Any] = {}
@@ -236,6 +238,7 @@ def run_fake(
         stop_requested=stop_requested,
         emit=emit,
         concurrent_metrics_sink=None if metrics is None else metrics.append,
+        evaluation_observer=evaluation,
         worker_join_timeout_s=0.2,
         **kwargs,
     )
@@ -482,6 +485,35 @@ def test_concurrent_tracker_model_and_selector_keep_distinct_owners(
     assert selector_owner_names == {threading.current_thread().name}
 
 
+def test_concurrent_evaluation_separates_observations_from_control_updates() -> None:
+    clock = _SharedClock()
+    observation = Detection("marine_target", 0.90, 40, 40, 60, 60, 4)
+    source = FiniteSource([frame(0), frame(1), None], fps=30.0)
+    collector = ClosedLoopMetricsCollector()
+
+    processed = run_fake(
+        load_config("configs/development.yaml"),
+        source,
+        FakeDetector([(observation,), (observation,)]),
+        FakeActuator(),
+        selected_options=options(
+            max_frames=2,
+            tracker_backend="botsort",
+            tracker_config=Path("configs/trackers/general_botsort.yaml"),
+            target_classes=("marine_target",),
+        ),
+        monotonic=clock,
+        rate_monotonic=clock,
+        sleep=clock.advance,
+        evaluation=collector,
+    )
+
+    assert processed == 2
+    assert [item.selector_state for item in collector.observations] == ["acquiring", "locked"]
+    assert len(collector.controls) <= len(collector.observations)
+    assert all(item.result_age_ms is not None for item in collector.controls)
+
+
 def test_fresh_zero_detection_is_a_healthy_hold_command() -> None:
     source = FiniteSource([frame(0), None])
     detector = FakeDetector([()])
@@ -561,6 +593,7 @@ def test_stale_perception_stops_set_and_disables() -> None:
     actuator = FakeActuator()
     monotonic = _ThreadClock([0.0, 2.0, 2.0])
     rate_clock = iter((0.0, 0.0, 0.2))
+    collector = ClosedLoopMetricsCollector()
 
     with pytest.raises(StalePerceptionError, match="stale"):
         run_fake(
@@ -575,10 +608,14 @@ def test_stale_perception_stops_set_and_disables() -> None:
             ),
             monotonic=monotonic,
             rate_monotonic=lambda: next(rate_clock),
+            evaluation=collector,
         )
 
     assert len(actuator.commands) == 1
     assert actuator.disable_count == actuator.close_count == 1
+    assert collector.controls[-1].fresh is False
+    assert collector.controls[-1].target_supplied is False
+    assert collector.controls[-1].command is None
 
 
 def test_camera_failure_never_constructs_detector_or_actuator() -> None:

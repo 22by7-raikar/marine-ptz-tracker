@@ -12,6 +12,7 @@ import pytest
 import marine_ptz.vision_cli as vision_cli
 from marine_ptz.cancellation import OperationCancelled
 from marine_ptz.config import load_config
+from marine_ptz.evaluation import ClosedLoopMetricsCollector
 from marine_ptz.types import Detection, Frame
 from marine_ptz.vision_cli import VisionOptions, _target_classes, run_vision
 
@@ -222,6 +223,27 @@ def test_simulated_closed_loop_handles_target_and_lost_target() -> None:
     assert "logical_pan=93.00 logical_tilt=93.00" in lines[0]
     assert "logical_pan=93.00 logical_tilt=93.00" in lines[1]
     assert "physical_pan=n/a physical_tilt=n/a" in lines[0]
+
+
+def test_single_runtime_emits_passive_observation_and_control_metrics() -> None:
+    source = FakeSource([frame(0), None])
+    selected = Detection("boat", 0.9, 70, 40, 90, 60)
+    collector = ClosedLoopMetricsCollector()
+
+    processed = run_vision(
+        load_config("configs/development.yaml"),
+        options(),
+        source_factory=lambda _value: source,
+        detector_factory=lambda *_args, **_kwargs: FakeDetector([(selected,)]),
+        evaluation_observer=collector,
+        emit=lambda _line: None,
+    )
+
+    assert processed == 1
+    assert collector.observations[0].target_present is True
+    assert collector.controls[0].target_supplied is True
+    assert collector.controls[0].command is not None
+    assert collector.controls[0].result_age_ms is None
 
 
 def test_botsort_miss_uses_lost_target_hold_then_same_track_resumes() -> None:

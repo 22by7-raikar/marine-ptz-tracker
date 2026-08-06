@@ -33,6 +33,11 @@ from .concurrent_runtime import (
 )
 from .config import AppConfig, ConfigError, load_config
 from .digital_zoom import DigitalZoomController, ZoomTransform, identity_transform
+from .evaluation import (
+    EvaluationObserver,
+    make_control_sample,
+    make_observation_sample,
+)
 from .opencv_source import OpenCVSource, OpenCVSourceError, parse_source_argument
 from .tracking import (
     MarineTargetSelector,
@@ -333,6 +338,7 @@ def run_vision(
     stop_requested: Callable[[], bool] = _never_terminated,
     emit: Callable[[str], None] = print,
     observer: RuntimeObserver | None = None,
+    evaluation_observer: EvaluationObserver | None = None,
     concurrent_metrics_sink: Callable[[ConcurrentRuntimeMetrics], None] | None = None,
     worker_join_timeout_s: float = 2.0,
 ) -> int:
@@ -351,6 +357,7 @@ def run_vision(
             stop_requested=stop_requested,
             emit=emit,
             observer=observer,
+            evaluation_observer=evaluation_observer,
             metrics_sink=concurrent_metrics_sink,
             worker_join_timeout_s=worker_join_timeout_s,
         )
@@ -366,6 +373,7 @@ def run_vision(
         stop_requested=stop_requested,
         emit=emit,
         observer=observer,
+        evaluation_observer=evaluation_observer,
     )
 
 
@@ -382,6 +390,7 @@ def _run_vision_single(
     stop_requested: Callable[[], bool] = _never_terminated,
     emit: Callable[[str], None] = print,
     observer: RuntimeObserver | None = None,
+    evaluation_observer: EvaluationObserver | None = None,
 ) -> int:
     """Run the verified single-threaded pipeline."""
 
@@ -566,6 +575,18 @@ def _run_vision_single(
                 _raise_if_terminated(stop_requested)
             rate_limiter.wait()
             _raise_if_terminated(stop_requested)
+            if evaluation_observer is not None:
+                evaluation_observer.on_observation(
+                    make_observation_sample(
+                        frame,
+                        detections,
+                        target,
+                        selector.status,
+                        options.target_classes,
+                    )
+                )
+            previous_pan_deg = controller.pan_deg
+            previous_tilt_deg = controller.tilt_deg
             command = controller.command_for_target(frame, target)
             _raise_if_terminated(stop_requested)
             if actuator is None:
@@ -589,6 +610,24 @@ def _run_vision_single(
             )
             if observer is not None:
                 observer.on_frame(event)
+            if evaluation_observer is not None:
+                evaluation_observer.on_control(
+                    make_control_sample(
+                        frame=frame,
+                        target=target,
+                        settings=config.tracking,
+                        pan_limits=config.actuator.pan_limits,
+                        tilt_limits=config.actuator.tilt_limits,
+                        neutral_pan_deg=config.actuator.initial_pan_deg,
+                        neutral_tilt_deg=config.actuator.initial_tilt_deg,
+                        previous_pan_deg=previous_pan_deg,
+                        previous_tilt_deg=previous_tilt_deg,
+                        command=command,
+                        timestamp_s=now,
+                        fresh=True,
+                        result_age_s=None,
+                    )
+                )
 
             frame_times.append(now)
             rolling_fps = _rolling_fps(frame_times)
@@ -750,6 +789,7 @@ def _run_vision_concurrent(
     stop_requested: Callable[[], bool],
     emit: Callable[[str], None],
     observer: RuntimeObserver | None,
+    evaluation_observer: EvaluationObserver | None,
     metrics_sink: Callable[[ConcurrentRuntimeMetrics], None] | None,
     worker_join_timeout_s: float,
 ) -> int:
@@ -791,6 +831,7 @@ def _run_vision_concurrent(
     primary: BaseException | None = None
     primary_traceback: TracebackType | None = None
     cleanup_errors: list[Exception] = []
+    last_evaluated_sequence: int | None = None
 
     selector = _build_selector(options, monotonic)
     controller = ProportionalPTZController(
@@ -871,7 +912,18 @@ def _run_vision_concurrent(
                 first_frame = current_result.frame_packet.frame
                 # This real stream result may begin target confirmation before
                 # physical ENABLE; no unrelated warm-up image reaches BoT-SORT.
-                selector.select(first_frame, current_result.detections)
+                first_target = selector.select(first_frame, current_result.detections)
+                if evaluation_observer is not None:
+                    evaluation_observer.on_observation(
+                        make_observation_sample(
+                            first_frame,
+                            current_result.detections,
+                            first_target,
+                            selector.status,
+                            options.target_classes,
+                        )
+                    )
+                    last_evaluated_sequence = first_frame.sequence
                 cv2 = capture_state.cv2
                 if options.display or options.output is not None:
                     if cv2 is None:
@@ -973,6 +1025,20 @@ def _run_vision_concurrent(
                         frame = current_result.frame_packet.frame
                         detections = current_result.detections
                         target = selector.select(frame, detections)
+                        if (
+                            evaluation_observer is not None
+                            and frame.sequence != last_evaluated_sequence
+                        ):
+                            evaluation_observer.on_observation(
+                                make_observation_sample(
+                                    frame,
+                                    detections,
+                                    target,
+                                    selector.status,
+                                    options.target_classes,
+                                )
+                            )
+                            last_evaluated_sequence = frame.sequence
                         now = _runtime_timestamp(monotonic)
                         frame_times.append(now)
                         rolling_fps = _rolling_fps(frame_times)
@@ -1071,6 +1137,24 @@ def _run_vision_concurrent(
                         if result_age_s < 0.0:
                             raise RuntimeError("monotonic clock moved backwards")
                         if not current_result.healthy or result_age_s > freshness_s:
+                            if evaluation_observer is not None:
+                                evaluation_observer.on_control(
+                                    make_control_sample(
+                                        frame=current_result.frame_packet.frame,
+                                        target=None,
+                                        settings=config.tracking,
+                                        pan_limits=config.actuator.pan_limits,
+                                        tilt_limits=config.actuator.tilt_limits,
+                                        neutral_pan_deg=config.actuator.initial_pan_deg,
+                                        neutral_tilt_deg=config.actuator.initial_tilt_deg,
+                                        previous_pan_deg=controller.pan_deg,
+                                        previous_tilt_deg=controller.tilt_deg,
+                                        command=None,
+                                        timestamp_s=now,
+                                        fresh=False,
+                                        result_age_s=result_age_s,
+                                    )
+                                )
                             metrics.increment_stale()
                             raise StalePerceptionError(
                                 "latest perception result is stale or unhealthy; "
@@ -1078,6 +1162,22 @@ def _run_vision_concurrent(
                             )
                         frame = current_result.frame_packet.frame
                         target = selector.select(frame, current_result.detections)
+                        if (
+                            evaluation_observer is not None
+                            and frame.sequence != last_evaluated_sequence
+                        ):
+                            evaluation_observer.on_observation(
+                                make_observation_sample(
+                                    frame,
+                                    current_result.detections,
+                                    target,
+                                    selector.status,
+                                    options.target_classes,
+                                )
+                            )
+                            last_evaluated_sequence = frame.sequence
+                        previous_pan_deg = controller.pan_deg
+                        previous_tilt_deg = controller.tilt_deg
                         command = controller.command_for_target(frame, target)
                         _apply_concurrent_command(
                             actuator,
@@ -1090,6 +1190,24 @@ def _run_vision_concurrent(
                             metrics,
                             record_session_fault=(options.actuator_backend == "arduino_serial"),
                         )
+                        if evaluation_observer is not None:
+                            evaluation_observer.on_control(
+                                make_control_sample(
+                                    frame=frame,
+                                    target=target,
+                                    settings=config.tracking,
+                                    pan_limits=config.actuator.pan_limits,
+                                    tilt_limits=config.actuator.tilt_limits,
+                                    neutral_pan_deg=config.actuator.initial_pan_deg,
+                                    neutral_tilt_deg=config.actuator.initial_tilt_deg,
+                                    previous_pan_deg=previous_pan_deg,
+                                    previous_tilt_deg=previous_tilt_deg,
+                                    command=command,
+                                    timestamp_s=now,
+                                    fresh=True,
+                                    result_age_s=result_age_s,
+                                )
+                            )
                         # Anchor to completion, not the pre-SET deadline. A slow
                         # acknowledgement skips missed slots and cannot cause a
                         # burst or a second rate-limit sleep on the next SET.

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .benchmark import environment_metadata
 from .config import ConfigError, load_config
+from .evaluation import SettlingEvent
 from .opencv_source import OpenCVSourceError
 from .replay import AcceptanceThresholds, ReplayCancelled, ReplayError, ReplayOptions, run_replay
 from .vision_cli import _target_classes, _termination_signals
@@ -79,6 +80,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.tracker_max_unsupported_age is not None
                 else config.detection.tracker_max_unsupported_age_s
             ),
+            settling_events=tuple(_settling_event(value) for value in (args.settling_event or ())),
         )
         if not Path(options.model).is_file():
             print(
@@ -147,6 +149,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--tracker-input-confidence", type=float)
     parser.add_argument("--tracker-min-confirmation-hits", type=int)
     parser.add_argument("--tracker-max-unsupported-age", type=float)
+    parser.add_argument(
+        "--settling-event",
+        action="append",
+        metavar="NAME:START:END:TOLERANCE:DWELL_SECONDS",
+        help="repeatable declared target-motion window for settling analysis",
+    )
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--annotated-output", type=Path)
@@ -192,6 +200,17 @@ def _local_source(value: str) -> Path:
 def _validate_output_path(path: Path, name: str) -> None:
     if path.exists() and path.is_dir():
         raise ReplayError(f"{name} path must name a file, not a directory")
+
+
+def _settling_event(value: str) -> SettlingEvent:
+    fields = value.split(":")
+    if len(fields) != 5:
+        raise ReplayError("settling event must be NAME:START:END:TOLERANCE:DWELL_SECONDS")
+    name, start, end, tolerance, dwell = fields
+    try:
+        return SettlingEvent(name, int(start), int(end), float(tolerance), float(dwell))
+    except ValueError as exc:
+        raise ReplayError(f"invalid settling event {value!r}: {exc}") from exc
 
 
 if __name__ == "__main__":

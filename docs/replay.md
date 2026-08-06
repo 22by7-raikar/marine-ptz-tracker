@@ -20,10 +20,13 @@ an acceptance or physical-actuation report.
 
 ## Report contract
 
-Schema version 1 reports a replay-sanitized invocation, basename-only input path,
+Schema version 3 reports a replay-sanitized invocation, basename-only input path,
 allowlisted package/GPU metadata, resolved inference device, finite-media frame
-count when OpenCV provides it, dimensions once a frame is processed, metrics,
-and explicit threshold results. The shared benchmark writer serializes with
+count when OpenCV provides it, dimensions once a frame is processed, replay
+metrics, closed-loop observation/control metrics, and explicit threshold results.
+Schema-version-2 reports remain readable through `normalize_replay_report()` and
+are explicitly marked as lacking closed-loop data; unsupported versions fail
+closed. The shared benchmark writer serializes with
 `allow_nan=False`, flushes and fsyncs a same-directory temporary file, then
 atomically replaces the report path. Failures before that replacement preserve
 an existing report. Unavailable values are JSON `null`, never `NaN` or
@@ -68,6 +71,55 @@ Definitions are deterministic:
   configured inclusive lower or upper limit.
 - Empty timing/error samples report `null` summaries; a single sample has equal
   mean, median, p95, and p99.
+
+The schema-v3 `closed_loop` section uses two explicit populations. An
+observation is one newly consumed inference result; a control decision is one
+scheduled controller opportunity. Concurrent rendering can therefore produce
+more observations than the 10 Hz control schedule. Centering statistics include
+only control decisions supplied with a current detector-supported locked
+observation. Acquisition, occlusion, prediction-only results, missing/malformed
+track IDs, stale results, and lost targets retain their state and identity
+metadata but have no invented center or controller-target measurement.
+
+Selector-state frame counts and ratios are the current evidence-safe summaries.
+Do not quote `selector_state_seconds` as evaluation evidence until the known
+replay time-base discrepancy for those durations is corrected.
+
+For a current box center `(x, y)` and full-frame center `(cx, cy)`, the closed-loop
+errors are `ex = (x - cx) / (width / 2)`, `ey = (y - cy) / (height / 2)`, and
+`er = sqrt(ex^2 + ey^2)`. Signed means are reported per axis; absolute axis and
+radial distributions report p50, p95, p99, and maximum. The coordinates are the
+original full-frame coordinates used by PTZ control, never annotated or digitally
+zoomed display coordinates.
+
+Initial acquisition runs from the first relevant current observation to the
+first locked current observation. Reacquisition events separate a short
+same-locked-ID recovery from a post-expiration reacquisition. A direct locked-ID
+change without an intervening unlocked/expired boundary is counted separately as
+a protected-lock ID change; a different ID after expiration is not mislabeled as
+that error. Missing IDs and malformed detection values have separate counters.
+
+Control metrics describe existing commands: update rate, absolute command-delta
+distributions, deadband ratio over controller-supported updates, pre-limit
+maximum-step and logical-limit saturation, resulting logical endpoint hits,
+direction reversals, and lost-target actions. Concurrent result age is sampled at
+the actual control decision. Single-mode result age is `null` because that runtime
+does not retain a separate decision timestamp; capture-to-command latency is not
+substituted. Stale decisions have no controller-supported target or command.
+
+Settling and overshoot are unavailable unless target-motion events are declared
+explicitly. Add repeatable annotations as:
+
+```text
+--settling-event NAME:START_FRAME:END_FRAME:TOLERANCE:DWELL_SECONDS
+```
+
+Within each declared inclusive frame window, settling time starts at the first
+observed window timestamp and ends at the first current-observation sample whose
+radial normalized error begins a continuous in-tolerance dwell. Missing or
+prediction-only observations break the dwell. Overshoot is the positive increase
+from the first observed radial error to the largest observed radial error in the
+window. These are evaluation annotations, not inferred target-step events.
 
 No threshold is invented. With no supplied threshold, acceptance is `null` and
 the tool is report-only. A threshold with an unavailable actual metric fails

@@ -178,7 +178,7 @@ def test_single_image_uses_production_loop_and_writes_strict_report(tmp_path: Pa
     report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
 
     assert report == payload(result)
-    assert report["schema_version"] == 2
+    assert report["schema_version"] == 3
     assert report["completion"] == {"status": "completed", "exit_reason": "eof"}
     assert report["input"]["source_type"] == "image"  # type: ignore[index]
     assert report["input"]["total_frames_available"] == 1  # type: ignore[index]
@@ -186,6 +186,7 @@ def test_single_image_uses_production_loop_and_writes_strict_report(tmp_path: Pa
     assert report["metrics"]["simulated_actuator_command_count"] == 1  # type: ignore[index]
     assert report["environment"] == {"torch_version": "fake"}
     assert report["invocation"]["arguments"][-1] == "<redacted>"  # type: ignore[index]
+    assert report["closed_loop"]["target_availability"]["observation_frames"] == 1  # type: ignore[index]
 
 
 def test_ordered_video_replay_acquires_botsort_track_on_second_observation(
@@ -216,6 +217,40 @@ def test_ordered_video_replay_acquires_botsort_track_on_second_observation(
         "<local-path:general_botsort.yaml>"
     )
     assert report["configuration"]["tracker_input_confidence"] == 0.20  # type: ignore[index]
+    assert report["closed_loop"]["acquisition"]["frames_to_lock"] == 1  # type: ignore[index]
+    assert report["closed_loop"]["identity"]["unique_observed_track_ids"] == [11]  # type: ignore[index]
+
+
+def test_schema_two_report_has_non_mutating_closed_loop_compatibility_view() -> None:
+    original: dict[str, object] = {"schema_version": 2, "metrics": {"processed_frames": 5}}
+
+    normalized = replay.normalize_replay_report(original)
+
+    assert "closed_loop" not in original
+    assert normalized["metrics"] == {"processed_frames": 5}
+    assert normalized["closed_loop"] == {
+        "available": False,
+        "reason": "schema version 2 did not record closed-loop frame data",
+    }
+
+
+@pytest.mark.parametrize("version", [1, 4, True, "3"])
+def test_unsupported_or_malformed_replay_schema_is_rejected(version: object) -> None:
+    with pytest.raises(ReplayError, match="schema_version"):
+        replay.normalize_replay_report({"schema_version": version})
+
+
+def test_settling_event_cli_parser_is_explicit_and_validated() -> None:
+    event = replay_cli._settling_event("move-left:10:40:0.10:0.25")
+
+    assert event.name == "move-left"
+    assert event.start_frame == 10
+    assert event.end_frame == 40
+    assert event.tolerance == 0.10
+    assert event.dwell_s == 0.25
+
+    with pytest.raises(ReplayError, match="settling event"):
+        replay_cli._settling_event("hidden-heuristic")
 
 
 def test_finite_video_metrics_cover_delayed_acquisition_and_lost_episodes(tmp_path: Path) -> None:

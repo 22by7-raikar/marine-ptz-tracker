@@ -6,7 +6,7 @@ import math
 import statistics
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -20,6 +20,7 @@ from .benchmark import (
     write_report,
 )
 from .config import AppConfig
+from .evaluation import ClosedLoopMetricsCollector, SettlingEvent
 from .vision_cli import (
     RuntimeCompleteEvent,
     RuntimeFrameEvent,
@@ -30,7 +31,8 @@ from .vision_cli import (
     run_vision,
 )
 
-REPLAY_SCHEMA_VERSION = 2
+REPLAY_SCHEMA_VERSION = 3
+SUPPORTED_REPLAY_SCHEMA_VERSIONS = frozenset({2, REPLAY_SCHEMA_VERSION})
 _PATH_ARGUMENTS = frozenset(
     {
         "--source",
@@ -138,6 +140,7 @@ class ReplayOptions:
     tracker_input_confidence: float = 0.20
     tracker_min_confirmation_hits: int = 2
     tracker_max_unsupported_age_s: float = 0.30
+    settling_events: tuple[SettlingEvent, ...] = ()
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, Path) or not str(self.source):
@@ -208,6 +211,10 @@ class ReplayOptions:
             raise ReplayError(
                 "tracker_config must name an existing file when tracker_backend is 'botsort'"
             )
+        if not isinstance(self.settling_events, tuple) or any(
+            not isinstance(item, SettlingEvent) for item in self.settling_events
+        ):
+            raise ReplayError("settling_events must contain SettlingEvent values")
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +269,7 @@ class ReplayReport:
     final_tilt_deg: float | None
     exit_reason: str
     threshold_results: tuple[ThresholdResult, ...]
+    closed_loop_metrics: Mapping[str, object] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, object]:
         inference = _timing_summary(self.inference_ms)
@@ -308,6 +316,16 @@ class ReplayReport:
                 "tracker_input_confidence": self.options.tracker_input_confidence,
                 "tracker_min_confirmation_hits": self.options.tracker_min_confirmation_hits,
                 "tracker_max_unsupported_age_s": self.options.tracker_max_unsupported_age_s,
+                "settling_events": [
+                    {
+                        "name": item.name,
+                        "start_frame": item.start_frame,
+                        "end_frame": item.end_frame,
+                        "tolerance": item.tolerance,
+                        "dwell_s": item.dwell_s,
+                    }
+                    for item in self.options.settling_events
+                ],
             },
             "environment": _sanitize_environment(self.environment),
             "metrics": {
@@ -335,6 +353,7 @@ class ReplayReport:
                 "final_pan_deg": self.final_pan_deg,
                 "final_tilt_deg": self.final_tilt_deg,
             },
+            "closed_loop": dict(self.closed_loop_metrics),
             "thresholds": {
                 "results": [result.to_dict() for result in self.threshold_results],
                 "acceptance": accepted,
@@ -483,6 +502,7 @@ def run_replay(
 ) -> ReplayRunResult:
     """Run finite media through ``run_vision`` and atomically write its report."""
     metrics = ReplayMetrics()
+    closed_loop = ClosedLoopMetricsCollector(options.settling_events)
     vision_options = VisionOptions(
         source=str(options.source),
         model=options.model,
@@ -512,6 +532,7 @@ def run_replay(
         stop_requested=stop_requested,
         emit=lambda _line: None,
         observer=metrics,
+        evaluation_observer=closed_loop,
     )
     if metrics.exit_reason == "cancelled" or stop_requested():
         raise ReplayCancelled("offline replay cancelled before acceptance completion")
@@ -546,9 +567,26 @@ def run_replay(
         final_tilt_deg=metrics.final_tilt_deg,
         exit_reason=metrics.exit_reason,
         threshold_results=threshold_results,
+        closed_loop_metrics=closed_loop.to_dict(),
     )
     write_report(report, options.report_path)
     return ReplayRunResult(report)
+
+
+def normalize_replay_report(payload: Mapping[str, object]) -> dict[str, object]:
+    """Return a non-mutating compatibility view of schema-v2 or schema-v3 reports."""
+    version = payload.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ReplayError("replay report schema_version must be an integer")
+    if version not in SUPPORTED_REPLAY_SCHEMA_VERSIONS:
+        raise ReplayError(f"unsupported replay report schema_version: {version}")
+    normalized = dict(payload)
+    if version == 2:
+        normalized["closed_loop"] = {
+            "available": False,
+            "reason": "schema version 2 did not record closed-loop frame data",
+        }
+    return normalized
 
 
 def _evaluate_thresholds(
