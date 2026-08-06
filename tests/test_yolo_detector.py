@@ -37,10 +37,12 @@ class FakeBoxes:
         xyxy: object,
         confidence: object,
         classes: object,
+        track_ids: object | None = None,
     ) -> None:
         self.xyxy = xyxy
         self.conf = confidence
         self.cls = classes
+        self.id = track_ids
 
 
 class FakeResult:
@@ -54,9 +56,14 @@ class FakeModel:
         self.results = results
         self.names = names
         self.calls: list[dict[str, object]] = []
+        self.track_calls: list[dict[str, object]] = []
 
     def predict(self, **kwargs: object) -> list[FakeResult]:
         self.calls.append(kwargs)
+        return self.results
+
+    def track(self, **kwargs: object) -> list[FakeResult]:
+        self.track_calls.append(kwargs)
         return self.results
 
 
@@ -179,6 +186,140 @@ def test_result_conversion_uses_model_names_filters_and_clamps() -> None:
     assert model.calls[0]["classes"] == [8]
     assert model.calls[0]["device"] == "cpu"
     assert model.calls[0]["imgsz"] == 320
+    assert model.track_calls == []
+
+
+def test_botsort_calls_track_once_per_frame_with_persistent_low_threshold() -> None:
+    names = {0: "marine_target"}
+    model = FakeModel(
+        [
+            FakeResult(
+                FakeBoxes(
+                    [[1.0, 2.0, 11.0, 12.0]],
+                    [0.30],
+                    [0.0],
+                    [17.0],
+                ),
+                names,
+            )
+        ],
+        names,
+    )
+    tracker_path = "configs/trackers/general_botsort.yaml"
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cpu",
+        confidence_threshold=0.60,
+        class_names=("marine_target",),
+        tracker_backend="botsort",
+        tracker_config=tracker_path,
+        tracker_input_confidence=0.20,
+        model_factory=lambda _name: model,
+    )
+
+    first = detector.detect(image_frame())
+    second = detector.detect(image_frame())
+
+    assert [detection.track_id for detection in first] == [17]
+    assert second == first
+    assert model.calls == []
+    assert len(model.track_calls) == 2
+    assert all(call["persist"] is True for call in model.track_calls)
+    assert all(call["tracker"] == tracker_path for call in model.track_calls)
+    assert all(call["conf"] == 0.20 for call in model.track_calls)
+
+
+@pytest.mark.parametrize(
+    "track_ids",
+    [None, [None], [float("nan")], [float("inf")], [-1.0], [1.5], [], [1.0, 2.0]],
+)
+def test_botsort_discards_missing_invalid_or_mismatched_track_ids(
+    track_ids: object,
+) -> None:
+    names = {0: "marine_target"}
+    model = FakeModel(
+        [
+            FakeResult(
+                FakeBoxes(
+                    [[1.0, 2.0, 11.0, 12.0]],
+                    [0.90],
+                    [0.0],
+                    track_ids,
+                ),
+                names,
+            )
+        ],
+        names,
+    )
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cpu",
+        confidence_threshold=0.60,
+        class_names=("marine_target",),
+        tracker_backend="botsort",
+        tracker_config="configs/trackers/general_botsort.yaml",
+        tracker_input_confidence=0.20,
+        model_factory=lambda _name: model,
+    )
+
+    assert detector.detect(image_frame()) == ()
+
+
+def test_separate_botsort_detector_instances_own_separate_models() -> None:
+    names = {0: "marine_target"}
+
+    def model() -> FakeModel:
+        return FakeModel(
+            [
+                FakeResult(
+                    FakeBoxes([[1.0, 2.0, 11.0, 12.0]], [0.90], [0.0], [3.0]),
+                    names,
+                )
+            ],
+            names,
+        )
+
+    first_model = model()
+    second_model = model()
+    common = {
+        "device": "cpu",
+        "confidence_threshold": 0.60,
+        "class_names": ("marine_target",),
+        "tracker_backend": "botsort",
+        "tracker_config": "configs/trackers/general_botsort.yaml",
+        "tracker_input_confidence": 0.20,
+    }
+    first = UltralyticsDetector(
+        "fake.pt",
+        model_factory=lambda _name: first_model,
+        **common,
+    )
+    second = UltralyticsDetector(
+        "fake.pt",
+        model_factory=lambda _name: second_model,
+        **common,
+    )
+
+    first.detect(image_frame())
+    second.detect(image_frame())
+
+    assert len(first_model.track_calls) == 1
+    assert len(second_model.track_calls) == 1
+
+
+def test_detector_only_mode_allows_confidence_below_unused_tracker_default() -> None:
+    model = FakeModel([], {0: "boat"})
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cpu",
+        confidence_threshold=0.10,
+        class_names=("boat",),
+        model_factory=lambda _name: model,
+    )
+
+    assert detector.detect(image_frame()) == ()
+    assert model.calls[0]["conf"] == 0.10
+    assert model.track_calls == []
 
 
 @pytest.mark.parametrize(
@@ -289,6 +430,39 @@ def test_gpu_like_tensors_are_detached_moved_to_cpu_and_converted() -> None:
             detection.bottom,
         )
     )
+
+
+def test_gpu_like_track_ids_are_moved_to_cpu_before_conversion() -> None:
+    track_ids = FakeTensor([21.0])
+    model = FakeModel(
+        [
+            FakeResult(
+                FakeBoxes(
+                    [[1.0, 2.0, 11.0, 12.0]],
+                    [0.90],
+                    [0.0],
+                    track_ids,
+                ),
+                {0: "marine_target"},
+            )
+        ],
+        {0: "marine_target"},
+    )
+    detector = UltralyticsDetector(
+        "fake.pt",
+        device="cpu",
+        confidence_threshold=0.60,
+        class_names=("marine_target",),
+        tracker_backend="botsort",
+        tracker_config="configs/trackers/general_botsort.yaml",
+        tracker_input_confidence=0.20,
+        model_factory=lambda _name: model,
+    )
+
+    detections = detector.detect(image_frame())
+
+    assert detections[0].track_id == 21
+    assert track_ids.calls == ["detach", "cpu", "tolist"]
 
 
 def test_duplicate_tied_results_are_preserved_in_source_order() -> None:

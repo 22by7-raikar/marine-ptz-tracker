@@ -54,6 +54,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 maximum_pan_saturation_count=args.max_pan_saturation_count,
                 maximum_tilt_saturation_count=args.max_tilt_saturation_count,
             ),
+            tracker_backend=args.tracker or config.detection.tracker_backend,
+            tracker_config=(
+                args.tracker_config
+                if args.tracker_config is not None
+                else (
+                    None
+                    if config.detection.tracker_config is None
+                    else Path(config.detection.tracker_config)
+                )
+            ),
+            tracker_input_confidence=(
+                args.tracker_input_confidence
+                if args.tracker_input_confidence is not None
+                else config.detection.tracker_input_confidence
+            ),
+            tracker_min_confirmation_hits=(
+                args.tracker_min_confirmation_hits
+                if args.tracker_min_confirmation_hits is not None
+                else config.detection.tracker_min_confirmation_hits
+            ),
+            tracker_max_unsupported_age_s=(
+                args.tracker_max_unsupported_age
+                if args.tracker_max_unsupported_age is not None
+                else config.detection.tracker_max_unsupported_age_s
+            ),
         )
         if not Path(options.model).is_file():
             print(
@@ -117,6 +142,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--confidence", type=float)
     parser.add_argument("--iou", type=float)
     parser.add_argument("--image-size", type=int)
+    parser.add_argument("--tracker", choices=("none", "botsort"))
+    parser.add_argument("--tracker-config", type=Path)
+    parser.add_argument("--tracker-input-confidence", type=float)
+    parser.add_argument("--tracker-min-confirmation-hits", type=int)
+    parser.add_argument("--tracker-max-unsupported-age", type=float)
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--annotated-output", type=Path)

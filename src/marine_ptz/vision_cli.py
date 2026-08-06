@@ -34,7 +34,11 @@ from .concurrent_runtime import (
 from .config import AppConfig, ConfigError, load_config
 from .digital_zoom import DigitalZoomController, ZoomTransform, identity_transform
 from .opencv_source import OpenCVSource, OpenCVSourceError, parse_source_argument
-from .tracking import MarineTargetSelector, ProportionalPTZController
+from .tracking import (
+    MarineTargetSelector,
+    ProportionalPTZController,
+    TargetSelectionStatus,
+)
 from .types import AngleLimits, Detection, Frame, PTZCommand, Target
 from .video_recorder import WallClockVideoRecorder
 from .yolo_detector import UltralyticsDetector, UltralyticsDetectorError
@@ -60,6 +64,11 @@ class VisionOptions:
     output_fps: float | None = None
     runtime_mode: str = "single"
     result_freshness_s: float | None = None
+    tracker_backend: str = "none"
+    tracker_config: Path | None = None
+    tracker_input_confidence: float = 0.20
+    tracker_min_confirmation_hits: int = 2
+    tracker_max_unsupported_age_s: float = 0.30
 
 
 class RuntimeCleanupError(RuntimeError):
@@ -422,9 +431,12 @@ def _run_vision_single(
             iou_threshold=options.iou_threshold,
             image_size=options.image_size,
             class_names=options.target_classes,
+            tracker_backend=options.tracker_backend,
+            tracker_config=options.tracker_config,
+            tracker_input_confidence=options.tracker_input_confidence,
         )
         _raise_if_terminated(stop_requested)
-        selector = MarineTargetSelector(options.target_classes)
+        selector = _build_selector(options, monotonic)
         controller = ProportionalPTZController(
             config.tracking,
             config.actuator.pan_limits,
@@ -600,6 +612,7 @@ def _run_vision_single(
                     config.actuator.pan_limits,
                     config.actuator.tilt_limits,
                     zoom_transform.zoom_factor,
+                    selection_status=selector.status,
                 )
             )
 
@@ -617,6 +630,7 @@ def _run_vision_single(
                     config.actuator.pan_limits,
                     config.actuator.tilt_limits,
                     zoom_transform,
+                    selection_status=selector.status,
                 )
                 if options.output is not None:
                     if resources.writer is None:
@@ -778,7 +792,7 @@ def _run_vision_concurrent(
     primary_traceback: TracebackType | None = None
     cleanup_errors: list[Exception] = []
 
-    selector = MarineTargetSelector(options.target_classes)
+    selector = _build_selector(options, monotonic)
     controller = ProportionalPTZController(
         config.tracking,
         config.actuator.pan_limits,
@@ -855,6 +869,9 @@ def _run_vision_concurrent(
                 current_result = first_result_value.value
                 result_version = first_result_value.version
                 first_frame = current_result.frame_packet.frame
+                # This real stream result may begin target confirmation before
+                # physical ENABLE; no unrelated warm-up image reaches BoT-SORT.
+                selector.select(first_frame, current_result.detections)
                 cv2 = capture_state.cv2
                 if options.display or options.output is not None:
                     if cv2 is None:
@@ -986,6 +1003,7 @@ def _run_vision_concurrent(
                                 config.actuator.tilt_limits,
                                 zoom_transform.zoom_factor,
                                 concurrent_rates,
+                                selector.status,
                             )
                         )
                         if cv2 is not None:
@@ -1003,6 +1021,7 @@ def _run_vision_concurrent(
                                 config.actuator.tilt_limits,
                                 zoom_transform,
                                 concurrent_rates,
+                                selector.status,
                             )
                             if options.output is not None:
                                 render_version = render_channel.publish(
@@ -1354,6 +1373,9 @@ def _inference_worker(
             iou_threshold=options.iou_threshold,
             image_size=options.image_size,
             class_names=options.target_classes,
+            tracker_backend=options.tracker_backend,
+            tracker_config=options.tracker_config,
+            tracker_input_confidence=options.tracker_input_confidence,
         )
         first_inference = True
         while not cancellation.is_set():
@@ -1699,6 +1721,35 @@ def _validate_options(config: AppConfig, options: VisionOptions) -> None:
         raise ValueError("at least one non-empty target class is required")
     _probability(options.confidence_threshold, "confidence")
     _probability(options.iou_threshold, "IoU")
+    if options.tracker_backend not in {"none", "botsort"}:
+        raise ValueError("tracker must be none or botsort")
+    tracker_input_confidence = _probability(
+        options.tracker_input_confidence,
+        "tracker input confidence",
+    )
+    if options.tracker_backend == "botsort" and tracker_input_confidence > float(
+        options.confidence_threshold
+    ):
+        raise ValueError("tracker input confidence must not exceed confidence")
+    if (
+        isinstance(options.tracker_min_confirmation_hits, bool)
+        or not isinstance(options.tracker_min_confirmation_hits, int)
+        or options.tracker_min_confirmation_hits <= 0
+    ):
+        raise ValueError("tracker minimum confirmation hits must be a positive integer")
+    if (
+        isinstance(options.tracker_max_unsupported_age_s, bool)
+        or not isinstance(options.tracker_max_unsupported_age_s, Real)
+        or not math.isfinite(float(options.tracker_max_unsupported_age_s))
+        or float(options.tracker_max_unsupported_age_s) <= 0.0
+    ):
+        raise ValueError("tracker maximum unsupported age must be a finite positive number")
+    if options.tracker_config is not None and not options.tracker_config.is_file():
+        raise ValueError("--tracker-config must name an existing file when provided")
+    if options.tracker_backend == "botsort" and options.tracker_config is None:
+        raise ValueError(
+            "--tracker-config must name an existing file when --tracker botsort is selected"
+        )
     if (
         isinstance(options.image_size, bool)
         or not isinstance(options.image_size, int)
@@ -1745,6 +1796,23 @@ def _validate_options(config: AppConfig, options: VisionOptions) -> None:
             "result freshness must be less than the configured firmware watchdog timeout"
         )
     _resolved_serial_port(config, options)
+
+
+def _build_selector(
+    options: VisionOptions,
+    monotonic: Callable[[], float],
+) -> MarineTargetSelector:
+    if options.tracker_backend == "none":
+        return MarineTargetSelector(options.target_classes)
+    return MarineTargetSelector(
+        options.target_classes,
+        tracker_backend=options.tracker_backend,
+        acquisition_confidence=options.confidence_threshold,
+        support_confidence=options.tracker_input_confidence,
+        minimum_confirmation_hits=options.tracker_min_confirmation_hits,
+        maximum_unsupported_age_s=options.tracker_max_unsupported_age_s,
+        monotonic=monotonic,
+    )
 
 
 def _probability(value: object, field_name: str) -> float:
@@ -1885,12 +1953,27 @@ def _telemetry_line(
     tilt_limits: AngleLimits,
     digital_zoom: float = 1.0,
     concurrent_rates: _ConcurrentRates | None = None,
+    selection_status: TargetSelectionStatus | None = None,
 ) -> str:
     target_text = "none" if target is None else target.detection.label
     error_text = "none" if error is None else f"{error[0]:.1f},{error[1]:.1f}"
     physical_pan, physical_tilt = _physical_angles(actuator)
     physical_pan_text = "n/a" if physical_pan is None else f"{physical_pan:.0f}"
     physical_tilt_text = "n/a" if physical_tilt is None else f"{physical_tilt:.0f}"
+    tracker_status = selection_status or _fallback_selection_status(target)
+    locked_id = (
+        "none" if tracker_status.locked_track_id is None else str(tracker_status.locked_track_id)
+    )
+    selected_confidence = (
+        "none"
+        if tracker_status.selected_confidence is None
+        else f"{tracker_status.selected_confidence:.2f}"
+    )
+    unsupported_age = (
+        "none"
+        if tracker_status.unsupported_age_s is None
+        else f"{tracker_status.unsupported_age_s:.3f}"
+    )
     rate_text = (
         f"fps={fps:.1f}"
         if concurrent_rates is None
@@ -1908,6 +1991,10 @@ def _telemetry_line(
     )
     return (
         f"seq={frame.sequence:06d} detections={len(detections)} target={target_text} "
+        f"tracker={tracker_status.tracker} active_tracks={tracker_status.active_track_count} "
+        f"locked_track_id={locked_id} state={tracker_status.state} "
+        f"confirmation_hits={tracker_status.confirmation_hits} "
+        f"selected_confidence={selected_confidence} unsupported_age_s={unsupported_age} "
         f"error_px={error_text} logical_pan={actuator.pan_deg:.2f} "
         f"logical_tilt={actuator.tilt_deg:.2f} physical_pan={physical_pan_text} "
         f"physical_tilt={physical_tilt_text} "
@@ -1932,6 +2019,7 @@ def _annotate(
     tilt_limits: AngleLimits,
     zoom_transform: ZoomTransform | None = None,
     concurrent_rates: _ConcurrentRates | None = None,
+    selection_status: TargetSelectionStatus | None = None,
 ) -> Any:
     if frame.image is None:
         raise ValueError("cannot annotate a frame without an image")
@@ -1949,17 +2037,19 @@ def _annotate(
             interpolation=cv2.INTER_LINEAR,
         )
     selected = target.detection if target is not None else None
+    tracker_status = selection_status or _fallback_selection_status(target)
     for detection in detections:
         box = transform.transform_box(detection)
         if box is None:
             continue
-        color = (0, 255, 255) if detection == selected else (0, 200, 0)
+        color = (0, 255, 255) if detection is selected else (0, 200, 0)
         start = (round(box[0]), round(box[1]))
         end = (round(box[2]), round(box[3]))
         cv2.rectangle(rendered, start, end, color, 2)
+        identity = "" if detection.track_id is None else f" id={detection.track_id}"
         cv2.putText(
             rendered,
-            f"{detection.label} {detection.confidence:.2f}",
+            f"{detection.label}{identity} {detection.confidence:.2f}",
             (start[0], max(15, start[1] - 6)),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.5,
@@ -2007,8 +2097,19 @@ def _annotate(
             )
         )
     )
+    locked_id = (
+        "none" if tracker_status.locked_track_id is None else str(tracker_status.locked_track_id)
+    )
+    unsupported_age = (
+        "none"
+        if tracker_status.unsupported_age_s is None
+        else f"{tracker_status.unsupported_age_s:.3f}s"
+    )
     lines = (
         f"tracking={'locked' if target is not None else 'lost'}",
+        f"tracker={tracker_status.tracker} state={tracker_status.state} "
+        f"active={tracker_status.active_track_count} locked_id={locked_id}",
+        f"confirmation_hits={tracker_status.confirmation_hits} unsupported_age={unsupported_age}",
         (
             "target_confidence=none"
             if target is None
@@ -2035,6 +2136,18 @@ def _annotate(
             cv2.LINE_AA,
         )
     return rendered
+
+
+def _fallback_selection_status(target: Target | None) -> TargetSelectionStatus:
+    return TargetSelectionStatus(
+        tracker="none",
+        active_track_count=0,
+        locked_track_id=None,
+        state="none" if target is None else "locked",
+        confirmation_hits=0 if target is None else 1,
+        selected_confidence=None if target is None else target.detection.confidence,
+        unsupported_age_s=None,
+    )
 
 
 def _physical_angles(actuator: Any) -> tuple[float | None, float | None]:
@@ -2125,6 +2238,15 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--confidence", type=float)
     parser.add_argument("--iou", type=float)
     parser.add_argument("--image-size", type=int)
+    parser.add_argument(
+        "--tracker",
+        choices=("none", "botsort"),
+        help="optional Ultralytics tracker backend",
+    )
+    parser.add_argument("--tracker-config", type=Path, help="tracker YAML configuration path")
+    parser.add_argument("--tracker-input-confidence", type=float)
+    parser.add_argument("--tracker-min-confirmation-hits", type=int)
+    parser.add_argument("--tracker-max-unsupported-age", type=float)
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--display", action="store_true")
     parser.add_argument("--output", type=Path, help="annotated video output path")
@@ -2257,6 +2379,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_fps=args.output_fps,
             runtime_mode=args.runtime_mode or config.runtime.execution_mode,
             result_freshness_s=args.result_freshness,
+            tracker_backend=args.tracker or config.detection.tracker_backend,
+            tracker_config=(
+                args.tracker_config
+                if args.tracker_config is not None
+                else (
+                    None
+                    if config.detection.tracker_config is None
+                    else Path(config.detection.tracker_config)
+                )
+            ),
+            tracker_input_confidence=(
+                args.tracker_input_confidence
+                if args.tracker_input_confidence is not None
+                else config.detection.tracker_input_confidence
+            ),
+            tracker_min_confirmation_hits=(
+                args.tracker_min_confirmation_hits
+                if args.tracker_min_confirmation_hits is not None
+                else config.detection.tracker_min_confirmation_hits
+            ),
+            tracker_max_unsupported_age_s=(
+                args.tracker_max_unsupported_age
+                if args.tracker_max_unsupported_age is not None
+                else config.detection.tracker_max_unsupported_age_s
+            ),
         )
         with _termination_signals() as termination:
             run_vision(config, options, stop_requested=termination)

@@ -17,11 +17,16 @@ camera:
 
 detection:
   backend: ultralytics
-  model: runs/detect/runs/tugboat/yolo11n-marine-target-v3/weights/best.pt
+  model: runs/detect/runs/detect/runs/tugboat/yolo11n-marine-target-v4/weights/best.pt
   device: auto
   confidence_threshold: 0.60
   iou_threshold: 0.45
   image_size: 640
+  tracker_backend: botsort
+  tracker_config: configs/trackers/general_botsort.yaml
+  tracker_input_confidence: 0.20
+  tracker_min_confirmation_hits: 2
+  tracker_max_unsupported_age_s: 0.30
   target_labels:
     - marine_target
 

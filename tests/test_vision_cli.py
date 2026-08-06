@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import signal
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -164,12 +165,15 @@ def options(
     digital_zoom: bool = False,
     max_digital_zoom: float = 2.0,
     output_fps: float | None = None,
+    tracker_backend: str = "none",
+    tracker_config: Path | None = None,
+    target_classes: tuple[str, ...] = ("boat",),
 ) -> VisionOptions:
     return VisionOptions(
         source="video.mp4",
         model="fake.pt",
         device="cpu",
-        target_classes=("boat",),
+        target_classes=target_classes,
         confidence_threshold=0.5,
         iou_threshold=0.45,
         image_size=320,
@@ -179,6 +183,11 @@ def options(
         digital_zoom=digital_zoom,
         max_digital_zoom=max_digital_zoom,
         output_fps=output_fps,
+        tracker_backend=tracker_backend,
+        tracker_config=tracker_config,
+        tracker_input_confidence=0.20,
+        tracker_min_confirmation_hits=2,
+        tracker_max_unsupported_age_s=0.30,
     )
 
 
@@ -213,6 +222,35 @@ def test_simulated_closed_loop_handles_target_and_lost_target() -> None:
     assert "logical_pan=93.00 logical_tilt=93.00" in lines[0]
     assert "logical_pan=93.00 logical_tilt=93.00" in lines[1]
     assert "physical_pan=n/a physical_tilt=n/a" in lines[0]
+
+
+def test_botsort_miss_uses_lost_target_hold_then_same_track_resumes() -> None:
+    source = FakeSource([frame(0), frame(1), frame(2), frame(3), None])
+    observation = Detection("marine_target", 0.90, 70, 40, 90, 60, 7)
+    detector = FakeDetector([(observation,), (observation,), (), (observation,)])
+    lines: list[str] = []
+
+    processed = run_vision(
+        load_config("configs/development.yaml"),
+        options(
+            tracker_backend="botsort",
+            tracker_config=Path("configs/trackers/general_botsort.yaml"),
+            target_classes=("marine_target",),
+        ),
+        source_factory=lambda _value: source,
+        detector_factory=lambda *_args, **_kwargs: detector,
+        emit=lines.append,
+    )
+
+    assert processed == 4
+    assert "state=acquiring" in lines[0]
+    assert "state=locked" in lines[1]
+    assert "logical_pan=93.00" in lines[1]
+    assert "state=occluded" in lines[2]
+    assert "target=none" in lines[2]
+    assert "logical_pan=93.00" in lines[2]
+    assert "state=locked" in lines[3]
+    assert "logical_pan=96.00" in lines[3]
 
 
 def test_cleanup_releases_source_writer_and_windows_after_normal_eof(
@@ -258,6 +296,83 @@ def test_zoomed_writer_and_display_receive_the_same_rendered_view(tmp_path: Path
     assert len(writer.frames) == 1
     assert cv2.shown_frames == writer.frames
     assert any(text.startswith("digital_zoom=1.25x") for text in cv2.annotation_text)
+
+
+def test_tracker_none_passes_the_current_selected_detection_to_digital_zoom(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    updates: list[Detection | None] = []
+    original_zoom_controller = vision_cli.DigitalZoomController
+
+    class RecordingZoomController(original_zoom_controller):
+        def update(
+            self,
+            frame_width: int,
+            frame_height: int,
+            selected: Detection | None,
+        ) -> object:
+            updates.append(selected)
+            return super().update(frame_width, frame_height, selected)
+
+    monkeypatch.setattr(vision_cli, "DigitalZoomController", RecordingZoomController)
+    writer = FakeWriter()
+    cv2 = FakeCV2(writer)
+    source = FakeSource([frame(0), None], cv2)
+    observed = Detection("boat", 0.9, 70, 40, 90, 60)
+
+    run_vision(
+        load_config("configs/development.yaml"),
+        options(display=True, digital_zoom=True),
+        source_factory=lambda _value: source,
+        detector_factory=lambda *_args, **_kwargs: FakeDetector([(observed,)]),
+    )
+
+    assert updates == [observed]
+    assert len(cv2.resize_calls) == 1
+
+
+def test_botsort_digital_zoom_uses_only_current_locked_observations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    updates: list[Detection | None] = []
+    original_zoom_controller = vision_cli.DigitalZoomController
+
+    class RecordingZoomController(original_zoom_controller):
+        def update(
+            self,
+            frame_width: int,
+            frame_height: int,
+            selected: Detection | None,
+        ) -> object:
+            updates.append(selected)
+            return super().update(frame_width, frame_height, selected)
+
+    monkeypatch.setattr(vision_cli, "DigitalZoomController", RecordingZoomController)
+    writer = FakeWriter()
+    cv2 = FakeCV2(writer)
+    source = FakeSource([frame(0), frame(1), frame(2), None], cv2)
+    observed = Detection("marine_target", 0.9, 70, 40, 90, 60, 7)
+    prediction_only = Detection("marine_target", 0.9, 0, 0, 20, 20)
+
+    run_vision(
+        load_config("configs/development.yaml"),
+        options(
+            display=True,
+            digital_zoom=True,
+            tracker_backend="botsort",
+            tracker_config=Path("configs/trackers/general_botsort.yaml"),
+            target_classes=("marine_target",),
+        ),
+        source_factory=lambda _value: source,
+        detector_factory=lambda *_args, **_kwargs: FakeDetector(
+            [(observed,), (observed,), (prediction_only,)]
+        ),
+    )
+
+    # The first hit acquires, the second locks and can zoom, and a detection
+    # without a current tracker identity is never treated as a zoom target.
+    assert updates == [None, observed, None]
+    assert len(cv2.resize_calls) == 2
 
 
 def test_output_video_uses_wall_clock_timestamps_without_changing_display_rate(
@@ -365,6 +480,30 @@ def test_annotation_includes_tracking_state() -> None:
     )
 
     assert "tracking=locked" in cv2.annotation_text
+
+
+def test_annotation_labels_tracks_and_emphasizes_locked_selection_state() -> None:
+    writer = FakeWriter()
+    cv2 = FakeCV2(writer)
+    source = FakeSource([frame(0), frame(1), None], cv2)
+    observation = Detection("marine_target", 0.90, 40, 40, 60, 60, 7)
+    detector = FakeDetector([(observation,), (observation,)])
+
+    run_vision(
+        load_config("configs/development.yaml"),
+        options(
+            display=True,
+            tracker_backend="botsort",
+            tracker_config=Path("configs/trackers/general_botsort.yaml"),
+            target_classes=("marine_target",),
+        ),
+        source_factory=lambda _value: source,
+        detector_factory=lambda *_args, **_kwargs: detector,
+    )
+
+    assert "marine_target id=7 0.90" in cv2.annotation_text
+    assert any("tracker=botsort state=locked" in line for line in cv2.annotation_text)
+    assert "confirmation_hits=2 unsupported_age=0.000s" in cv2.annotation_text
 
 
 def test_terminal_and_display_diagnostics_distinguish_logical_physical_and_limits() -> None:
@@ -669,6 +808,82 @@ def test_cli_uses_config_detection_defaults(monkeypatch: pytest.MonkeyPatch) -> 
     assert selected.image_size == 640
     assert selected.runtime_mode == "single"
     assert selected.result_freshness_s is None
+    assert selected.tracker_backend == "none"
+    assert selected.tracker_config is None
+
+
+def test_cli_tracker_overrides_are_forwarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[VisionOptions] = []
+    monkeypatch.setattr(
+        vision_cli,
+        "run_vision",
+        lambda _config, selected, **_kwargs: captured.append(selected) or 0,
+    )
+
+    result = vision_cli.main(
+        [
+            "--config",
+            "configs/development.yaml",
+            "--source",
+            "path:video.mp4",
+            "--tracker",
+            "botsort",
+            "--tracker-config",
+            "configs/trackers/general_botsort.yaml",
+            "--tracker-input-confidence",
+            "0.20",
+            "--tracker-min-confirmation-hits",
+            "3",
+            "--tracker-max-unsupported-age",
+            "0.40",
+        ]
+    )
+
+    assert result == 0
+    selected = captured[0]
+    assert selected.tracker_backend == "botsort"
+    assert selected.tracker_config == Path("configs/trackers/general_botsort.yaml")
+    assert selected.tracker_input_confidence == 0.20
+    assert selected.tracker_min_confirmation_hits == 3
+    assert selected.tracker_max_unsupported_age_s == 0.40
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"tracker_backend": "invalid"}, "tracker"),
+        ({"tracker_backend": "botsort", "tracker_config": None}, "tracker-config"),
+        (
+            {
+                "tracker_backend": "botsort",
+                "tracker_config": Path("configs/trackers/general_botsort.yaml"),
+                "tracker_input_confidence": 0.70,
+            },
+            "input confidence",
+        ),
+        ({"tracker_min_confirmation_hits": 0}, "confirmation hits"),
+        ({"tracker_max_unsupported_age_s": 0.0}, "unsupported age"),
+    ],
+)
+def test_tracker_option_validation_precedes_resource_construction(
+    changes: dict[str, object],
+    message: str,
+) -> None:
+    constructed = False
+
+    def source_factory(_value: object) -> FakeSource:
+        nonlocal constructed
+        constructed = True
+        return FakeSource([])
+
+    with pytest.raises(ValueError, match=message):
+        run_vision(
+            load_config("configs/development.yaml"),
+            replace(options(), **changes),
+            source_factory=source_factory,
+        )
+
+    assert constructed is False
 
 
 def test_cli_runtime_mode_and_freshness_override_configuration(

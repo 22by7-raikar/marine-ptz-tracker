@@ -7,6 +7,7 @@ import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from importlib import import_module
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -63,6 +64,9 @@ class UltralyticsDetector:
         iou_threshold: float = 0.45,
         image_size: int = 640,
         class_names: Sequence[str] | None = None,
+        tracker_backend: str = "none",
+        tracker_config: str | Path | None = None,
+        tracker_input_confidence: float = 0.20,
         model_factory: Callable[[str], Any] | None = None,
         torch_module: Any | None = None,
         clock: Callable[[], float] = time.perf_counter,
@@ -73,6 +77,34 @@ class UltralyticsDetector:
             raise ValueError("iou_threshold must be finite and between 0 and 1")
         if isinstance(image_size, bool) or not isinstance(image_size, int) or image_size <= 0:
             raise ValueError("image_size must be a positive integer")
+        if not isinstance(tracker_backend, str):
+            raise ValueError("tracker_backend must be 'none' or 'botsort'")
+        normalized_tracker = tracker_backend.strip().casefold()
+        if normalized_tracker not in {"none", "botsort"}:
+            raise ValueError("tracker_backend must be 'none' or 'botsort'")
+        if (
+            isinstance(tracker_input_confidence, bool)
+            or not isinstance(tracker_input_confidence, Real)
+            or not math.isfinite(float(tracker_input_confidence))
+            or not 0 <= float(tracker_input_confidence) <= 1
+            or (
+                normalized_tracker == "botsort"
+                and float(tracker_input_confidence) > confidence_threshold
+            )
+        ):
+            raise ValueError(
+                "tracker_input_confidence must be finite, between 0 and 1, and not "
+                "exceed confidence_threshold"
+            )
+        tracker_path: Path | None = None
+        if tracker_config is not None:
+            tracker_path = Path(tracker_config)
+        if tracker_path is not None and not tracker_path.is_file():
+            raise ValueError("tracker_config must name an existing file when provided")
+        if normalized_tracker == "botsort" and tracker_path is None:
+            raise ValueError(
+                "tracker_config must name an existing file when tracker_backend is 'botsort'"
+            )
         self._device = resolve_inference_device(device, torch_module=torch_module)
         self._torch = (
             torch_module
@@ -91,6 +123,9 @@ class UltralyticsDetector:
         self._confidence_threshold = confidence_threshold
         self._iou_threshold = iou_threshold
         self._image_size = image_size
+        self._tracker_backend = normalized_tracker
+        self._tracker_config = tracker_path
+        self._tracker_input_confidence = float(tracker_input_confidence)
         self._class_names = (
             frozenset(name.strip().casefold() for name in class_names if name.strip())
             if class_names
@@ -106,6 +141,10 @@ class UltralyticsDetector:
     @property
     def last_inference_ms(self) -> float:
         return self._last_inference_ms
+
+    @property
+    def tracker_backend(self) -> str:
+        return self._tracker_backend
 
     def synchronize(self) -> None:
         """Synchronize the selected CUDA device when warm-up timing requires it."""
@@ -125,17 +164,29 @@ class UltralyticsDetector:
 
         started = self._clock()
         try:
-            results = list(
-                self._model.predict(
-                    source=frame.image,
-                    conf=self._confidence_threshold,
-                    iou=self._iou_threshold,
-                    imgsz=self._image_size,
-                    device=self._device,
-                    classes=class_ids if class_ids else None,
-                    verbose=False,
+            common_arguments = {
+                "source": frame.image,
+                "conf": (
+                    self._tracker_input_confidence
+                    if self._tracker_backend == "botsort"
+                    else self._confidence_threshold
+                ),
+                "iou": self._iou_threshold,
+                "imgsz": self._image_size,
+                "device": self._device,
+                "classes": class_ids if class_ids else None,
+                "verbose": False,
+            }
+            if self._tracker_backend == "botsort":
+                results = list(
+                    self._model.track(
+                        **common_arguments,
+                        persist=True,
+                        tracker=str(self._tracker_config),
+                    )
                 )
-            )
+            else:
+                results = list(self._model.predict(**common_arguments))
         except Exception as exc:
             raise UltralyticsDetectorError(
                 f"Ultralytics inference failed on {self._device}: {exc}"
@@ -159,11 +210,19 @@ class UltralyticsDetector:
         coordinates = _to_list(getattr(boxes, "xyxy", ()))
         confidences = _to_list(getattr(boxes, "conf", ()))
         classes = _to_list(getattr(boxes, "cls", ()))
+        track_ids = (
+            _to_list(getattr(boxes, "id", ()))
+            if self._tracker_backend == "botsort"
+            else [None] * len(coordinates)
+        )
+        if not (len(coordinates) == len(confidences) == len(classes) == len(track_ids)):
+            return []
         converted: list[Detection] = []
-        for raw_box, raw_confidence, raw_class in zip(
+        for raw_box, raw_confidence, raw_class, raw_track_id in zip(
             coordinates,
             confidences,
             classes,
+            track_ids,
         ):
             parsed = _validated_box(
                 raw_box,
@@ -172,8 +231,14 @@ class UltralyticsDetector:
                 names,
                 frame.width,
                 frame.height,
-                self._confidence_threshold,
+                (
+                    self._tracker_input_confidence
+                    if self._tracker_backend == "botsort"
+                    else self._confidence_threshold
+                ),
                 self._class_names,
+                raw_track_id,
+                require_track_id=self._tracker_backend == "botsort",
             )
             if parsed is not None:
                 converted.append(parsed)
@@ -232,6 +297,9 @@ def _validated_box(
     height: int,
     confidence_threshold: float,
     requested_names: frozenset[str] | None,
+    raw_track_id: Any = None,
+    *,
+    require_track_id: bool = False,
 ) -> Detection | None:
     if not isinstance(raw_box, Sequence) or len(raw_box) != 4:
         return None
@@ -260,4 +328,23 @@ def _validated_box(
     bottom = min(float(height), max(0.0, bottom))
     if right <= left or bottom <= top:
         return None
-    return Detection(label, confidence, left, top, right, bottom)
+    track_id = _validated_track_id(raw_track_id)
+    if require_track_id and track_id is None:
+        return None
+    if raw_track_id is not None and track_id is None:
+        return None
+    return Detection(label, confidence, left, top, right, bottom, track_id)
+
+
+def _validated_track_id(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        return None
+    track_id = int(number)
+    if number != track_id or track_id < 0:
+        return None
+    return track_id
