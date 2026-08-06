@@ -30,8 +30,17 @@ from .vision_cli import (
     run_vision,
 )
 
-REPLAY_SCHEMA_VERSION = 1
-_PATH_ARGUMENTS = frozenset({"--source", "--model", "--config", "--report", "--annotated-output"})
+REPLAY_SCHEMA_VERSION = 2
+_PATH_ARGUMENTS = frozenset(
+    {
+        "--source",
+        "--model",
+        "--config",
+        "--report",
+        "--annotated-output",
+        "--tracker-config",
+    }
+)
 
 
 class ReplayError(ValueError):
@@ -124,6 +133,11 @@ class ReplayOptions:
     report_path: Path
     annotated_output: Path | None = None
     thresholds: AcceptanceThresholds = AcceptanceThresholds()
+    tracker_backend: str = "none"
+    tracker_config: Path | None = None
+    tracker_input_confidence: float = 0.20
+    tracker_min_confirmation_hits: int = 2
+    tracker_max_unsupported_age_s: float = 0.30
 
     def __post_init__(self) -> None:
         if not isinstance(self.source, Path) or not str(self.source):
@@ -163,6 +177,37 @@ class ReplayOptions:
         resolved = [path.resolve(strict=False) for path in paths]
         if len(set(resolved)) != len(resolved):
             raise ReplayError("source, report, and annotated output paths must differ")
+        if self.tracker_backend not in {"none", "botsort"}:
+            raise ReplayError("tracker_backend must be 'none' or 'botsort'")
+        tracker_input = _finite_number(
+            self.tracker_input_confidence,
+            "tracker_input_confidence",
+        )
+        if not 0.0 <= tracker_input <= 1.0 or (
+            self.tracker_backend == "botsort" and tracker_input > self.confidence_threshold
+        ):
+            raise ReplayError(
+                "tracker_input_confidence must be a probability and, for botsort, "
+                "must not exceed confidence_threshold"
+            )
+        if (
+            isinstance(self.tracker_min_confirmation_hits, bool)
+            or not isinstance(self.tracker_min_confirmation_hits, int)
+            or self.tracker_min_confirmation_hits <= 0
+        ):
+            raise ReplayError("tracker_min_confirmation_hits must be a positive integer")
+        unsupported_age = _finite_number(
+            self.tracker_max_unsupported_age_s,
+            "tracker_max_unsupported_age_s",
+        )
+        if unsupported_age <= 0.0:
+            raise ReplayError("tracker_max_unsupported_age_s must be greater than zero")
+        if self.tracker_config is not None and not self.tracker_config.is_file():
+            raise ReplayError("tracker_config must name an existing file when provided")
+        if self.tracker_backend == "botsort" and self.tracker_config is None:
+            raise ReplayError(
+                "tracker_config must name an existing file when tracker_backend is 'botsort'"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +299,15 @@ class ReplayReport:
                 "iou_threshold": self.options.iou_threshold,
                 "image_size": self.options.image_size,
                 "max_frames": self.options.max_frames,
+                "tracker_backend": self.options.tracker_backend,
+                "tracker_config": (
+                    None
+                    if self.options.tracker_config is None
+                    else _safe_path(self.options.tracker_config)
+                ),
+                "tracker_input_confidence": self.options.tracker_input_confidence,
+                "tracker_min_confirmation_hits": self.options.tracker_min_confirmation_hits,
+                "tracker_max_unsupported_age_s": self.options.tracker_max_unsupported_age_s,
             },
             "environment": _sanitize_environment(self.environment),
             "metrics": {
@@ -441,6 +495,11 @@ def run_replay(
         display=False,
         output=options.annotated_output,
         actuator_backend="simulated",
+        tracker_backend=options.tracker_backend,
+        tracker_config=options.tracker_config,
+        tracker_input_confidence=options.tracker_input_confidence,
+        tracker_min_confirmation_hits=options.tracker_min_confirmation_hits,
+        tracker_max_unsupported_age_s=options.tracker_max_unsupported_age_s,
     )
     run_vision(
         config,

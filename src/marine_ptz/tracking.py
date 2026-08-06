@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from math import isfinite
 from numbers import Real
+from typing import Callable
 
 from .config import TrackingConfig
 from .types import AngleLimits, Detection, Frame, PTZCommand, Target
@@ -20,14 +23,92 @@ class HighestConfidenceTargetSelector:
         return Target(detection=detection, frame_sequence=frame.sequence)
 
 
-class MarineTargetSelector:
-    """Select configured marine classes using a deterministic ranking policy."""
+@dataclass(frozen=True, slots=True)
+class TargetSelectionStatus:
+    """Current single-target lock state for telemetry and diagnostics."""
 
-    def __init__(self, target_classes: Sequence[str] = ("boat",)) -> None:
+    tracker: str
+    active_track_count: int
+    locked_track_id: int | None
+    state: str
+    confirmation_hits: int
+    selected_confidence: float | None
+    unsupported_age_s: float | None
+
+
+class MarineTargetSelector:
+    """Select one marine target, optionally retaining one tracked identity."""
+
+    def __init__(
+        self,
+        target_classes: Sequence[str] = ("boat",),
+        *,
+        tracker_backend: str = "none",
+        acquisition_confidence: float = 0.60,
+        support_confidence: float = 0.20,
+        minimum_confirmation_hits: int = 2,
+        maximum_unsupported_age_s: float = 0.30,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
         normalized = tuple(name.strip().casefold() for name in target_classes if name.strip())
         if not normalized:
             raise ValueError("at least one target class is required")
+        tracker = tracker_backend.strip().casefold()
+        if tracker not in {"none", "botsort"}:
+            raise ValueError("tracker_backend must be 'none' or 'botsort'")
+        for value, name in (
+            (acquisition_confidence, "acquisition_confidence"),
+            (support_confidence, "support_confidence"),
+            (maximum_unsupported_age_s, "maximum_unsupported_age_s"),
+        ):
+            if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(float(value)):
+                raise ValueError(f"{name} must be finite")
+        if not 0.0 <= support_confidence <= 1.0 or not 0.0 <= acquisition_confidence <= 1.0:
+            raise ValueError("support_confidence and acquisition_confidence must be probabilities")
+        if tracker == "botsort" and support_confidence > acquisition_confidence:
+            raise ValueError(
+                "support_confidence and acquisition_confidence must satisfy "
+                "0 <= support <= acquisition <= 1"
+            )
+        if (
+            isinstance(minimum_confirmation_hits, bool)
+            or not isinstance(minimum_confirmation_hits, int)
+            or minimum_confirmation_hits <= 0
+        ):
+            raise ValueError("minimum_confirmation_hits must be a positive integer")
+        if maximum_unsupported_age_s <= 0.0:
+            raise ValueError("maximum_unsupported_age_s must be greater than zero")
         self._target_classes = frozenset(normalized)
+        self._tracker_backend = tracker
+        self._acquisition_confidence = float(acquisition_confidence)
+        self._support_confidence = float(support_confidence)
+        self._minimum_confirmation_hits = minimum_confirmation_hits
+        self._maximum_unsupported_age_s = float(maximum_unsupported_age_s)
+        self._monotonic = monotonic
+        self.reset()
+
+    @property
+    def status(self) -> TargetSelectionStatus:
+        return self._status
+
+    def reset(self) -> None:
+        """Release all acquisition/lock state for a new source or runtime."""
+        self._pending_track_id: int | None = None
+        self._confirmation_hits = 0
+        self._locked_track_id: int | None = None
+        self._last_supported_s: float | None = None
+        self._last_observed_s: float | None = None
+        self._last_frame_sequence: int | None = None
+        self._cached_target: Target | None = None
+        self._status = TargetSelectionStatus(
+            tracker=self._tracker_backend,
+            active_track_count=0,
+            locked_track_id=None,
+            state="none",
+            confirmation_hits=0,
+            selected_confidence=None,
+            unsupported_age_s=None,
+        )
 
     def select(self, frame: Frame, detections: Sequence[Detection]) -> Target | None:
         candidates = [
@@ -35,26 +116,203 @@ class MarineTargetSelector:
             for detection in detections
             if _is_valid_detection(detection) and detection.label.casefold() in self._target_classes
         ]
-        if not candidates:
-            return None
-        frame_center_x = frame.width / 2
-        frame_center_y = frame.height / 2
-
-        def rank(detection: Detection) -> tuple[float, ...]:
-            center_x, center_y = detection.center
-            distance_squared = (center_x - frame_center_x) ** 2 + (center_y - frame_center_y) ** 2
-            return (
-                -detection.confidence,
-                -detection.area,
-                distance_squared,
-                detection.left,
-                detection.top,
-                detection.right,
-                detection.bottom,
+        if self._tracker_backend == "none":
+            selected = _ranked_detection(frame, candidates)
+            target = (
+                None
+                if selected is None
+                else Target(detection=selected, frame_sequence=frame.sequence)
             )
+            self._status = TargetSelectionStatus(
+                tracker="none",
+                active_track_count=0,
+                locked_track_id=None,
+                state="none" if target is None else "locked",
+                confirmation_hits=0 if target is None else 1,
+                selected_confidence=None if target is None else target.detection.confidence,
+                unsupported_age_s=None,
+            )
+            return target
 
-        selected = min(candidates, key=rank)
-        return Target(detection=selected, frame_sequence=frame.sequence)
+        if self._last_frame_sequence == frame.sequence:
+            return self._selection_for_repeated_frame()
+        if self._last_frame_sequence is not None and frame.sequence < self._last_frame_sequence:
+            self.reset()
+
+        now = self._timestamp()
+        if self._last_observed_s is not None and now < self._last_observed_s:
+            self.reset()
+        self._last_observed_s = now
+        self._last_frame_sequence = frame.sequence
+        tracked = [
+            detection
+            for detection in candidates
+            if detection.track_id is not None and detection.confidence >= self._support_confidence
+        ]
+        active_track_count = len({detection.track_id for detection in tracked})
+
+        if self._locked_track_id is not None:
+            supported = [
+                detection for detection in tracked if detection.track_id == self._locked_track_id
+            ]
+            selected = _ranked_detection(frame, supported)
+            if selected is not None:
+                self._last_supported_s = now
+                target = Target(detection=selected, frame_sequence=frame.sequence)
+                self._cached_target = target
+                self._status = TargetSelectionStatus(
+                    tracker="botsort",
+                    active_track_count=active_track_count,
+                    locked_track_id=self._locked_track_id,
+                    state="locked",
+                    confirmation_hits=self._confirmation_hits,
+                    selected_confidence=selected.confidence,
+                    unsupported_age_s=0.0,
+                )
+                return target
+
+            unsupported_age = self._unsupported_age(now)
+            if unsupported_age <= self._maximum_unsupported_age_s:
+                self._cached_target = None
+                self._status = TargetSelectionStatus(
+                    tracker="botsort",
+                    active_track_count=active_track_count,
+                    locked_track_id=self._locked_track_id,
+                    state="occluded",
+                    confirmation_hits=self._confirmation_hits,
+                    selected_confidence=None,
+                    unsupported_age_s=unsupported_age,
+                )
+                return None
+            self._release_lock()
+
+        acquisition = [
+            detection
+            for detection in tracked
+            if detection.confidence >= self._acquisition_confidence
+        ]
+        selected = _ranked_detection(frame, acquisition)
+        if selected is None or selected.track_id is None:
+            self._pending_track_id = None
+            self._confirmation_hits = 0
+            self._cached_target = None
+            self._status = TargetSelectionStatus(
+                tracker="botsort",
+                active_track_count=active_track_count,
+                locked_track_id=None,
+                state="none",
+                confirmation_hits=0,
+                selected_confidence=None,
+                unsupported_age_s=None,
+            )
+            return None
+
+        if selected.track_id == self._pending_track_id:
+            self._confirmation_hits += 1
+        else:
+            self._pending_track_id = selected.track_id
+            self._confirmation_hits = 1
+        if self._confirmation_hits < self._minimum_confirmation_hits:
+            self._cached_target = None
+            self._status = TargetSelectionStatus(
+                tracker="botsort",
+                active_track_count=active_track_count,
+                locked_track_id=None,
+                state="acquiring",
+                confirmation_hits=self._confirmation_hits,
+                selected_confidence=None,
+                unsupported_age_s=None,
+            )
+            return None
+
+        self._locked_track_id = selected.track_id
+        self._last_supported_s = now
+        target = Target(detection=selected, frame_sequence=frame.sequence)
+        self._cached_target = target
+        self._status = TargetSelectionStatus(
+            tracker="botsort",
+            active_track_count=active_track_count,
+            locked_track_id=self._locked_track_id,
+            state="locked",
+            confirmation_hits=self._confirmation_hits,
+            selected_confidence=selected.confidence,
+            unsupported_age_s=0.0,
+        )
+        return target
+
+    def _timestamp(self) -> float:
+        value = self._monotonic()
+        if isinstance(value, bool) or not isinstance(value, Real) or not isfinite(float(value)):
+            self._release_lock()
+            raise ValueError("selector monotonic clock must return a finite number")
+        return float(value)
+
+    def _unsupported_age(self, now: float) -> float:
+        if self._last_supported_s is None:
+            return self._maximum_unsupported_age_s + 1.0
+        return max(0.0, now - self._last_supported_s)
+
+    def _selection_for_repeated_frame(self) -> Target | None:
+        if self._locked_track_id is None:
+            return self._cached_target
+        now = self._timestamp()
+        if self._last_observed_s is not None and now < self._last_observed_s:
+            self.reset()
+            return None
+        unsupported_age = self._unsupported_age(now)
+        if unsupported_age > self._maximum_unsupported_age_s:
+            active_track_count = self._status.active_track_count
+            self._release_lock()
+            self._cached_target = None
+            self._status = TargetSelectionStatus(
+                tracker="botsort",
+                active_track_count=active_track_count,
+                locked_track_id=None,
+                state="none",
+                confirmation_hits=0,
+                selected_confidence=None,
+                unsupported_age_s=None,
+            )
+            return None
+        self._status = TargetSelectionStatus(
+            tracker="botsort",
+            active_track_count=self._status.active_track_count,
+            locked_track_id=self._locked_track_id,
+            state=self._status.state,
+            confirmation_hits=self._confirmation_hits,
+            selected_confidence=self._status.selected_confidence,
+            unsupported_age_s=unsupported_age,
+        )
+        return self._cached_target
+
+    def _release_lock(self) -> None:
+        self._pending_track_id = None
+        self._confirmation_hits = 0
+        self._locked_track_id = None
+        self._last_supported_s = None
+
+
+def _ranked_detection(frame: Frame, candidates: Sequence[Detection]) -> Detection | None:
+    if not candidates:
+        return None
+    frame_center_x = frame.width / 2
+    frame_center_y = frame.height / 2
+
+    def rank(detection: Detection) -> tuple[float, ...]:
+        center_x, center_y = detection.center
+        distance_squared = (center_x - frame_center_x) ** 2 + (center_y - frame_center_y) ** 2
+        return (
+            -detection.confidence,
+            -detection.area,
+            distance_squared,
+            detection.left,
+            detection.top,
+            detection.right,
+            detection.bottom,
+            -1.0 if detection.track_id is None else float(detection.track_id),
+        )
+
+    return min(candidates, key=rank)
 
 
 class ProportionalPTZController:

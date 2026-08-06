@@ -59,6 +59,7 @@ class Detection:
     top: float
     right: float
     bottom: float
+    track_id: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.label, str) or not self.label.strip():
@@ -76,6 +77,12 @@ class Detection:
             raise ValueError("detection bounding box width must be greater than zero")
         if self.bottom <= self.top:
             raise ValueError("detection bounding box height must be greater than zero")
+        if self.track_id is not None and (
+            isinstance(self.track_id, bool)
+            or not isinstance(self.track_id, int)
+            or self.track_id < 0
+        ):
+            raise ValueError("detection.track_id must be a non-negative integer when provided")
 
     @property
     def center(self) -> tuple[float, float]:

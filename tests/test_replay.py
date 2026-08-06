@@ -178,7 +178,7 @@ def test_single_image_uses_production_loop_and_writes_strict_report(tmp_path: Pa
     report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
 
     assert report == payload(result)
-    assert report["schema_version"] == 1
+    assert report["schema_version"] == 2
     assert report["completion"] == {"status": "completed", "exit_reason": "eof"}
     assert report["input"]["source_type"] == "image"  # type: ignore[index]
     assert report["input"]["total_frames_available"] == 1  # type: ignore[index]
@@ -186,6 +186,36 @@ def test_single_image_uses_production_loop_and_writes_strict_report(tmp_path: Pa
     assert report["metrics"]["simulated_actuator_command_count"] == 1  # type: ignore[index]
     assert report["environment"] == {"torch_version": "fake"}
     assert report["invocation"]["arguments"][-1] == "<redacted>"  # type: ignore[index]
+
+
+def test_ordered_video_replay_acquires_botsort_track_on_second_observation(
+    tmp_path: Path,
+) -> None:
+    observation = Detection("marine_target", 0.90, 60, 40, 80, 60, 11)
+
+    result = run_fake(
+        tmp_path,
+        [frame(0), frame(1), None],
+        [(observation,), (observation,)],
+        options={
+            "target_classes": ("marine_target",),
+            "confidence_threshold": 0.60,
+            "tracker_backend": "botsort",
+            "tracker_config": Path("configs/trackers/general_botsort.yaml"),
+            "tracker_input_confidence": 0.20,
+            "tracker_min_confirmation_hits": 2,
+            "tracker_max_unsupported_age_s": 0.30,
+        },
+    )
+    report = result.report.to_dict()
+
+    assert report["metrics"]["processed_frames"] == 2  # type: ignore[index]
+    assert report["metrics"]["frames_with_selected_target"] == 1  # type: ignore[index]
+    assert report["configuration"]["tracker_backend"] == "botsort"  # type: ignore[index]
+    assert report["configuration"]["tracker_config"] == (  # type: ignore[index]
+        "<local-path:general_botsort.yaml>"
+    )
+    assert report["configuration"]["tracker_input_confidence"] == 0.20  # type: ignore[index]
 
 
 def test_finite_video_metrics_cover_delayed_acquisition_and_lost_episodes(tmp_path: Path) -> None:
@@ -440,6 +470,47 @@ def test_cli_requires_explicit_replay_safe_for_hardware_config(
     assert replay_cli.main([*command, "--replay-safe"]) == 0
 
 
+def test_replay_cli_forwards_tracker_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "input.mp4"
+    input_path.write_bytes(b"fixture")
+    captured: list[ReplayOptions] = []
+    monkeypatch.setattr(
+        replay_cli,
+        "run_replay",
+        lambda _config, selected, **_kwargs: (
+            captured.append(selected) or SimpleNamespace(accepted=None)
+        ),
+    )
+
+    result = replay_cli.main(
+        [
+            "--source",
+            str(input_path),
+            "--report",
+            str(tmp_path / "report.json"),
+            "--tracker",
+            "botsort",
+            "--tracker-config",
+            "configs/trackers/general_botsort.yaml",
+            "--tracker-input-confidence",
+            "0.20",
+            "--tracker-min-confirmation-hits",
+            "3",
+            "--tracker-max-unsupported-age",
+            "0.40",
+        ]
+    )
+
+    assert result == 0
+    assert captured[0].tracker_backend == "botsort"
+    assert captured[0].tracker_config == Path("configs/trackers/general_botsort.yaml")
+    assert captured[0].tracker_min_confirmation_hits == 3
+    assert captured[0].tracker_max_unsupported_age_s == 0.40
+
+
 @pytest.mark.parametrize(
     ("signal_number", "expected"),
     [(signal.SIGINT, 130), (signal.SIGTERM, 143)],
@@ -564,6 +635,7 @@ def test_replay_path_typed_urls_are_marked_by_field_type() -> None:
     report_url = "file:///home/alice/private/result.json?token=secret#fragment"
     config_url = "https://configs.example"
     annotated_url = "https://writer:pass@outputs.example/private/annotated.mp4?key=secret#fragment"
+    tracker_url = "https://tracker:pass@configs.example/private/botsort.yaml?token=secret"
 
     assert replay.sanitize_replay_command(
         (
@@ -574,6 +646,8 @@ def test_replay_path_typed_urls_are_marked_by_field_type() -> None:
             f"--config={config_url}",
             "--annotated-output",
             annotated_url,
+            "--tracker-config",
+            tracker_url,
         )
     ) == (
         "replay",
@@ -583,6 +657,8 @@ def test_replay_path_typed_urls_are_marked_by_field_type() -> None:
         "--config=<local-path:redacted>",
         "--annotated-output",
         "<local-path:annotated.mp4>",
+        "--tracker-config",
+        "<local-path:botsort.yaml>",
     )
 
 

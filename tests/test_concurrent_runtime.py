@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+import marine_ptz.vision_cli as vision_cli
 from marine_ptz.cancellation import OperationCancelled
 from marine_ptz.concurrent_runtime import (
     LatestValueChannel,
@@ -45,12 +46,15 @@ def options(
     arm_hardware: bool = False,
     max_frames: int | None = None,
     freshness_s: float | None = None,
+    tracker_backend: str = "none",
+    tracker_config: Path | None = None,
+    target_classes: tuple[str, ...] = ("boat",),
 ) -> VisionOptions:
     return VisionOptions(
         source="local.mp4",
         model="local.pt",
         device="cpu",
-        target_classes=("boat",),
+        target_classes=target_classes,
         confidence_threshold=0.5,
         iou_threshold=0.45,
         image_size=320,
@@ -61,6 +65,11 @@ def options(
         arm_hardware=arm_hardware,
         runtime_mode="concurrent",
         result_freshness_s=freshness_s,
+        tracker_backend=tracker_backend,
+        tracker_config=tracker_config,
+        tracker_input_confidence=0.20,
+        tracker_min_confirmation_hits=2,
+        tracker_max_unsupported_age_s=0.30,
     )
 
 
@@ -436,6 +445,41 @@ def test_concurrent_workers_have_single_component_owners() -> None:
     assert source.owner_daemon_flags == detector.owner_daemon_flags == {False}
     assert construction_threads["actuator"] == main_thread
     assert actuator.owner_threads == {main_thread}
+
+
+def test_concurrent_tracker_model_and_selector_keep_distinct_owners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selector_owner_names: set[str] = set()
+    original_selector = vision_cli.MarineTargetSelector
+
+    class RecordingSelector(original_selector):
+        def select(self, frame_value: Frame, detections: Any) -> Any:
+            selector_owner_names.add(threading.current_thread().name)
+            return super().select(frame_value, detections)
+
+    monkeypatch.setattr(vision_cli, "MarineTargetSelector", RecordingSelector)
+    observation = Detection("marine_target", 0.90, 40, 40, 60, 60, 4)
+    source = FiniteSource([frame(0), frame(1), None])
+    detector = FakeDetector([(observation,), (observation,)])
+    actuator = FakeActuator()
+
+    processed = run_fake(
+        load_config("configs/development.yaml"),
+        source,
+        detector,
+        actuator,
+        selected_options=options(
+            max_frames=2,
+            tracker_backend="botsort",
+            tracker_config=Path("configs/trackers/general_botsort.yaml"),
+            target_classes=("marine_target",),
+        ),
+    )
+
+    assert processed == 2
+    assert detector.owner_names == {"marine-ptz-inference"}
+    assert selector_owner_names == {threading.current_thread().name}
 
 
 def test_fresh_zero_detection_is_a_healthy_hold_command() -> None:

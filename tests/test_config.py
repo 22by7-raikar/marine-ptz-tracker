@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 
 import pytest
+import yaml
 
 from marine_ptz.config import ConfigError, load_config
 
@@ -16,6 +17,24 @@ def test_development_config_loads() -> None:
     assert config.tracking.lost_target_behavior == "hold"
     assert config.runtime.execution_mode == "single"
     assert config.runtime.result_freshness_s == 0.5
+    assert config.detection.tracker_backend == "none"
+    assert config.detection.tracker_config is None
+
+
+def test_detector_only_config_below_tracker_default_remains_backward_compatible(
+    tmp_path: Path,
+) -> None:
+    source = Path("configs/development.yaml").read_text(encoding="utf-8")
+    path = tmp_path / "low-confidence.yaml"
+    path.write_text(
+        source.replace("confidence_threshold: 0.60", "confidence_threshold: 0.10"),
+        encoding="utf-8",
+    )
+
+    config = load_config(path)
+
+    assert config.detection.tracker_backend == "none"
+    assert config.detection.confidence_threshold == 0.10
 
 
 @pytest.mark.parametrize(
@@ -47,6 +66,16 @@ def test_configuration_validation_reports_clear_path(
         ("development.yaml", "initial_pan_deg: 90.0", "actuator.initial_pan_deg"),
         ("development.yaml", "max_step_deg: 3.0", "tracking.max_step_deg"),
         ("hardware.yaml", "read_timeout_s: 0.25", "serial.read_timeout_s"),
+        (
+            "hardware.yaml",
+            "tracker_input_confidence: 0.20",
+            "detection.tracker_input_confidence",
+        ),
+        (
+            "hardware.yaml",
+            "tracker_max_unsupported_age_s: 0.30",
+            "detection.tracker_max_unsupported_age_s",
+        ),
         ("hardware.yaml", "pan_offset_deg: 180.0", "serial.pan_offset_deg"),
         ("hardware.yaml", "boot_grace_seconds: 2.0", "serial.boot_grace_seconds"),
         (
@@ -110,10 +139,15 @@ def test_hardware_config_loads_with_required_physical_fields() -> None:
     config = load_config(Path("configs/hardware.yaml"))
 
     assert config.detection.model == (
-        "runs/detect/runs/tugboat/yolo11n-marine-target-v3/weights/best.pt"
+        "runs/detect/runs/detect/runs/tugboat/yolo11n-marine-target-v4/weights/best.pt"
     )
     assert config.detection.target_labels == ("marine_target",)
     assert config.detection.confidence_threshold == 0.60
+    assert config.detection.tracker_backend == "botsort"
+    assert config.detection.tracker_config == "configs/trackers/general_botsort.yaml"
+    assert config.detection.tracker_input_confidence == 0.20
+    assert config.detection.tracker_min_confirmation_hits == 2
+    assert config.detection.tracker_max_unsupported_age_s == 0.30
     assert config.camera.device == (
         "/dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-1080p-S1_SN0001-video-index0"
     )
@@ -143,6 +177,67 @@ def test_hardware_config_loads_with_required_physical_fields() -> None:
     assert config.actuator.initial_tilt_deg == 90.0
     assert config.runtime.execution_mode == "single"
     assert config.runtime.result_freshness_s < config.serial.watchdog_timeout_s
+
+
+def test_botsort_configuration_matches_pinned_ultralytics_schema() -> None:
+    tracker = yaml.safe_load(
+        Path("configs/trackers/general_botsort.yaml").read_text(encoding="utf-8")
+    )
+
+    assert tracker == {
+        "tracker_type": "botsort",
+        "track_high_thresh": 0.60,
+        "track_low_thresh": 0.20,
+        "new_track_thresh": 0.60,
+        "track_buffer": 15,
+        "match_thresh": 0.80,
+        "fuse_score": True,
+        "gmc_method": "sparseOptFlow",
+        "proximity_thresh": 0.50,
+        "appearance_thresh": 0.80,
+        "with_reid": False,
+        "model": "auto",
+    }
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        ("tracker_backend: botsort", "tracker_backend: bytetrack", "tracker_backend"),
+        (
+            "tracker_config: configs/trackers/general_botsort.yaml",
+            "tracker_config: configs/trackers/missing.yaml",
+            "tracker_config",
+        ),
+        (
+            "tracker_input_confidence: 0.20",
+            "tracker_input_confidence: 0.70",
+            "tracker_input_confidence",
+        ),
+        (
+            "tracker_min_confirmation_hits: 2",
+            "tracker_min_confirmation_hits: 0",
+            "tracker_min_confirmation_hits",
+        ),
+        (
+            "tracker_max_unsupported_age_s: 0.30",
+            "tracker_max_unsupported_age_s: 0",
+            "tracker_max_unsupported_age_s",
+        ),
+    ],
+)
+def test_tracker_configuration_is_strict_and_actionable(
+    tmp_path: Path,
+    old: str,
+    new: str,
+    message: str,
+) -> None:
+    source = Path("configs/hardware.yaml").read_text(encoding="utf-8")
+    invalid = tmp_path / "invalid-tracker.yaml"
+    invalid.write_text(source.replace(old, new), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match=message):
+        load_config(invalid)
 
 
 @pytest.mark.parametrize(

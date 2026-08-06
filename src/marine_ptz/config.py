@@ -43,6 +43,11 @@ class DetectionConfig:
     device: str
     iou_threshold: float
     image_size: int
+    tracker_backend: str = "none"
+    tracker_config: str | None = None
+    tracker_input_confidence: float = 0.20
+    tracker_min_confirmation_hits: int = 2
+    tracker_max_unsupported_age_s: float = 0.30
 
 
 @dataclass(frozen=True, slots=True)
@@ -214,6 +219,11 @@ def _detection_config(data: Mapping[str, Any]) -> DetectionConfig:
             "device",
             "iou_threshold",
             "image_size",
+            "tracker_backend",
+            "tracker_config",
+            "tracker_input_confidence",
+            "tracker_min_confirmation_hits",
+            "tracker_max_unsupported_age_s",
         },
         path,
     )
@@ -235,6 +245,52 @@ def _detection_config(data: Mapping[str, Any]) -> DetectionConfig:
         raise ConfigError("detection.target_labels must be a non-empty list")
     if any(not isinstance(label, str) or not label.strip() for label in raw_labels):
         raise ConfigError("detection.target_labels entries must be non-empty strings")
+    tracker_backend = _optional_string(data, "tracker_backend", path, "none").casefold()
+    if tracker_backend not in {"none", "botsort"}:
+        raise ConfigError("detection.tracker_backend must be 'none' or 'botsort'")
+    tracker_config = data.get("tracker_config")
+    if tracker_config is not None and (
+        not isinstance(tracker_config, str) or not tracker_config.strip()
+    ):
+        raise ConfigError("detection.tracker_config must be a non-empty path when provided")
+    if isinstance(tracker_config, str):
+        tracker_config = tracker_config.strip()
+    if tracker_config is not None and not Path(tracker_config).is_file():
+        raise ConfigError(
+            f"detection.tracker_config does not exist or is not a file: {tracker_config}"
+        )
+    if tracker_backend == "botsort" and tracker_config is None:
+        raise ConfigError(
+            "detection.tracker_config is required when detection.tracker_backend is 'botsort'"
+        )
+    tracker_input_confidence = _optional_number(
+        data,
+        "tracker_input_confidence",
+        path,
+        0.20,
+    )
+    if not 0 <= tracker_input_confidence <= 1:
+        raise ConfigError("detection.tracker_input_confidence must be between 0 and 1")
+    if tracker_backend == "botsort" and tracker_input_confidence > threshold:
+        raise ConfigError(
+            "detection.tracker_input_confidence must not exceed detection.confidence_threshold"
+        )
+    tracker_min_confirmation_hits = _optional_integer(
+        data,
+        "tracker_min_confirmation_hits",
+        path,
+        2,
+    )
+    if tracker_min_confirmation_hits <= 0:
+        raise ConfigError("detection.tracker_min_confirmation_hits must be greater than zero")
+    tracker_max_unsupported_age_s = _optional_number(
+        data,
+        "tracker_max_unsupported_age_s",
+        path,
+        0.30,
+    )
+    if tracker_max_unsupported_age_s <= 0:
+        raise ConfigError("detection.tracker_max_unsupported_age_s must be greater than zero")
     return DetectionConfig(
         _string(data, "backend", path),
         threshold,
@@ -243,6 +299,11 @@ def _detection_config(data: Mapping[str, Any]) -> DetectionConfig:
         device,
         iou_threshold,
         image_size,
+        tracker_backend,
+        tracker_config,
+        tracker_input_confidence,
+        tracker_min_confirmation_hits,
+        tracker_max_unsupported_age_s,
     )
 
 
