@@ -131,3 +131,40 @@ validation, and test boundaries. The preparation stage validates normalized
 class-0 boxes and copies rather than mutates staging data. OpenCV and
 Ultralytics remain lazy operator-only dependencies; the core validation/split
 policy is hardware-free and testable without CUDA or model weights.
+
+## 2026-08-06: Add optional BoT-SORT identity without permitting prediction-only control
+
+Frame-by-frame detection remains available as `tracker_backend: none`, but it
+cannot protect a selected identity when multiple detections compete or frame
+confidence varies. The optional BoT-SORT path therefore uses Ultralytics
+`model.track(..., persist=True)` inside the existing detector. The detector
+instance is the sole owner of the model and persistent tracker state; in
+concurrent mode that ownership stays entirely within the inference worker.
+
+Track IDs are evidence for a separate `MarineTargetSelector`, not authority to
+actuate. New acquisition requires two current high-confidence observations by
+default. A locked ID may remain protected for a short unsupported interval, but
+the selector returns no cached or prediction-only coordinates during that
+interval. A different ID cannot take over until the old lock expires, after
+which ordinary confirmation is required again. This accepts limited identity
+continuity while retaining the existing lost-target, freshness, controller,
+limit, and actuator safety boundaries.
+
+BoT-SORT remains optional because association can switch IDs, lose targets
+under occlusion, and depends on detector quality and tuning. The checked-in
+configuration keeps ReID disabled, avoiding a second model and any claim of
+long-term re-identification.
+
+## 2026-08-06: Retain proportional control after a local latency-prediction experiment
+
+An optional current-observation-gated α-β predictor was implemented and tested
+locally with centroid velocity and a 40 ms projection horizon. It did not allow
+motion from prediction-only, occluded, or lost-target state, and it did not
+reduce the underlying capture, inference, serial, or actuator latency.
+
+Physical A/B observation did not demonstrate a tracking benefit sufficient to
+justify the estimator state and tuning complexity. The experiment was not
+pushed, merged, or retained; the public runtime continues to use the simpler
+bounded proportional controller. This decision does not claim that prediction
+is universally ineffective—only that this prototype produced insufficient
+evidence to justify it.

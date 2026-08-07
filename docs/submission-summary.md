@@ -27,8 +27,10 @@ the full software behavior can be tested with deterministic fakes.
   detections of the physical toy, so a one-class `marine_target` dataset and model
   were used. YOLO11n fits the prototype's GPU and latency budget.
 - **BoT-SORT identity with current-observation control:** two observations are
-  required before lock. A short occlusion can preserve identity, but Kalman-only
-  predictions never provide coordinates to the controller.
+  required before lock. The inference-owned detector calls persistent
+  `model.track()`, while the selector remains a separate policy boundary. A
+  short occlusion can preserve the locked identity, but cached or Kalman-only
+  coordinates never reach digital zoom or the controller.
 - **Bounded proportional control:** normalized pixel error drives pan/tilt through
   a deadband, proportional gain, three-degree maximum step, and 75–105 degree
   logical/physical limits. This is understandable, tunable, and appropriate for
@@ -45,10 +47,18 @@ the full software behavior can be tested with deterministic fakes.
 
 ## Defensible validation evidence
 
-Deterministic tests cover configuration, selection, controller signs and clamps,
-digital zoom, cancellation, serial faults, Python/C++ protocol parity, firmware
-state/watchdog behavior, replay privacy, and bounded cleanup. CI validates Python
-3.10/3.11 and compiles the Uno firmware without uploading it.
+The evidence categories are intentionally separate:
+
+| Evidence category | Established result |
+| --- | --- |
+| Unit/integration tested | Tracker configuration, persistent-track invocation, acquisition/occlusion/expiry, current-only zoom/control gating, controller bounds, cancellation, serial faults, Python/C++ protocol parity, firmware watchdog behavior, replay privacy, and bounded cleanup. |
+| Measured recorded-run evidence | The rate, latency, detection, selection, stale-result, and watchdog figures below, from one controlled run. |
+| Qualitative physical observation | Supervised desk-rig motion, target following, loss/reacquisition, and digital display zoom. |
+| Design property | Explicit arming, one model/tracker owner, one serial owner, latest-value handoffs, bounded commands, and firmware range/watchdog enforcement. |
+| Proposed future improvement | Encoder feedback, rigid mechanics, repeatable hardware-in-the-loop trials, and broader data. |
+
+CI validates Python 3.10/3.11 and compiles the Uno firmware without uploading
+it. Unit and integration tests do not constitute physical validation.
 
 In one recorded physical concurrent run, the system measured approximately **29.5
 unique inferences/s**, **40.6 ms p95 result age at control**, and **57.6 ms p95
@@ -82,3 +92,13 @@ bottleneck that justified their complexity, integration risk, calibration burden
 or reduced portability. The chosen architecture delivers measurable closed-loop
 behavior while keeping the $60–80 prototype understandable, testable, and safe to
 bring up under direct supervision.
+
+An optional current-observation-gated α-β latency predictor was also evaluated
+locally and not published. It estimated centroid velocity and projected the
+current control point with a 40 ms horizon, but never enabled prediction-only
+motion. Prediction did not reduce capture, inference, serial, or actuator
+latency, and physical A/B observation did not establish a tracking benefit.
+“Physical A/B testing did not demonstrate a tracking benefit sufficient to
+justify the additional estimator state and tuning complexity, so the simpler
+proportional-control baseline was retained.” This is a rejected experiment, not
+a feature of the public repository.

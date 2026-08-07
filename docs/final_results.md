@@ -1,9 +1,12 @@
 # Final checkpoint results
 
-The final one-class target is `marine_target`, the frozen dataset is
-`data/tugboat-v3`, and the frozen model is
-`runs/detect/runs/tugboat/yolo11n-marine-target-v3/weights/best.pt`. Generated
-data, weights, reports, and recordings remain outside Git.
+The last fully documented dataset/evaluation checkpoint uses the one-class
+target `marine_target`, frozen dataset `data/tugboat-v3`, and frozen evaluated
+model `runs/detect/runs/tugboat/yolo11n-marine-target-v3/weights/best.pt`.
+The current hardware configuration references a later local V4 weight path for
+the BoT-SORT runtime. This document contains no V4 precision/recall/mAP table,
+so the V3 model metrics below must not be attributed to V4. Generated data,
+weights, reports, and recordings remain outside Git.
 
 ## Measured model evidence
 

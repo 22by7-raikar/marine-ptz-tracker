@@ -124,6 +124,17 @@ Ultralytics, and pyserial remain unloaded. Existing rendering tests cover
 display `q`, annotation failure, writer construction/open/write failures, and
 resource release without opening a real display or file.
 
+BoT-SORT tests keep tracker behavior distinct from detector-only behavior. They
+prove the pinned tracker YAML (including disabled ReID and required
+`model: auto` compatibility field), persistent `model.track()` arguments,
+per-frame GPU-tensor-to-CPU ID conversion, rejection of missing/malformed IDs,
+separate model/tracker ownership per detector, two-hit acquisition, changed-ID
+confirmation reset, protected lock during a short unsupported interval, no
+prediction-only target/zoom coordinates, expiry followed by ordinary
+reacquisition, and stable ranking. Replay, single-runtime, and concurrent tests
+also prove that tracker configuration reaches the production detector/selector
+without giving the tracker direct controller or actuator access.
+
 Concurrent-runtime tests exercise the capacity-one replacement channel,
 single-owner capture/detector/actuator contexts, fresh zero-detection hold,
 stale-result shutdown, startup warm-up before enable, source/detector/serial/

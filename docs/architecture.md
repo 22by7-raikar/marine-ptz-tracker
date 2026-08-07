@@ -15,8 +15,9 @@ actuator. See [deployment and rollback](deployment.md).
 ```mermaid
 flowchart TD
     Media[Camera or finite media] --> Source[OpenCV CameraSource]
-    Source --> YOLO[Ultralytics YOLO Detector]
-    YOLO --> Select[Marine TargetSelector]
+    Source --> YOLO[Custom YOLO11n detector]
+    YOLO --> Track[Optional persistent BoT-SORT]
+    Track --> Select[Confirmation and current-observation selector]
     Select --> Control[Bounded PTZController]
     Select --> View[Optional digital crop\nannotation and output only]
     Source --> View
@@ -73,6 +74,52 @@ and safety boundaries remain in `vision_cli.py`.
 5. `Actuator.apply()` sends that command to a simulated or physical mechanism.
 6. Optional digital zoom transforms the selected overlay and a bounded crop for
    display/recording only; it never feeds detector or controller input.
+
+## BoT-SORT ownership and target-state boundary
+
+The real detector has two explicit modes. With `tracker_backend: none`, each
+call invokes `model.predict(...)` and returns ordinary detections without track
+IDs. With `tracker_backend: botsort`, each call invokes
+`model.track(..., persist=True, tracker=<configured-yaml>)`. The same
+`UltralyticsDetector` instance owns the model and BoT-SORT state for the source
+lifetime. In concurrent mode the inference worker alone constructs, warms,
+synchronizes, and calls that instance; neither the capture worker nor the main
+control context calls YOLO, CUDA, `model.track()`, or tracker state. Separate
+runtime detector instances therefore have separate model/tracker ownership.
+
+The checked-in BoT-SORT policy admits current detections at a support/input
+confidence of 0.20 while requiring the configured detection threshold (0.60 in
+the hardware configuration) for acquisition. ReID is disabled and no second
+model is loaded. BoT-SORT contributes a current track ID; it does not select a
+control target or authorize actuation.
+
+`MarineTargetSelector` applies the policy boundary after detection:
+
+1. a new ID must satisfy the acquisition threshold on two distinct current
+   frames by default;
+2. once locked, only a valid current detector result with that same ID returns
+   a `Target`;
+3. if support disappears, the selector protects the locked identity for up to
+   0.30 seconds by default but returns no target coordinates;
+4. a different visible ID cannot take over during that protected interval;
+5. after expiry, the old lock is released and any candidate must pass the same
+   confirmation process; and
+6. a changed ID during acquisition resets the confirmation count.
+
+The unsupported state is intentionally identity-only. No cached box, Kalman
+prediction, or tracker-only coordinate reaches digital zoom or the controller.
+Fresh zero-detection results therefore use the configured lost-target policy.
+A concurrent result that is unhealthy or older than its 0.5-second default
+freshness threshold is rejected before selector/controller advancement and
+enters the existing failure/disable path.
+
+Capacity-one frame and detection channels reinforce this contract: an unread
+older item is replaced by the newest item instead of forming a FIFO backlog.
+The main context renders new results as available and advances the selector and
+controller only at an actual scheduled control opportunity. BoT-SORT can still
+switch IDs, lose an object under occlusion, or associate similar objects; its
+behavior depends on detector quality and tracker tuning, and long-term
+re-identification is not guaranteed.
 
 The detector, selector, controller, and actuator always operate on the original
 full-frame pixels. `DigitalZoomController` is pure smoothing/geometry state

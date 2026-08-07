@@ -18,6 +18,25 @@ observer contract records one applied command per processed frame. Use
 the opt-in concurrent topology; do not reinterpret that performance report as
 an acceptance or physical-actuation report.
 
+Replay accepts the same tracker options as the live composition:
+
+```text
+--tracker {none,botsort}
+--tracker-config PATH
+--tracker-input-confidence FLOAT
+--tracker-min-confirmation-hits INTEGER
+--tracker-max-unsupported-age SECONDS
+```
+
+When BoT-SORT is selected, the replay detector calls Ultralytics
+`model.track(..., persist=True)` once per input frame and owns persistent
+tracker state for that replay. The selector still requires confirmed current
+observations and never substitutes a tracker prediction or cached box for a
+current control target. An unsupported locked ID may remain protected briefly,
+but that state produces no center-error or controller-target sample. Replay
+therefore evaluates the same current-observation gate as the live runtime; it
+does not create a more permissive tracking path.
+
 ## Report contract
 
 Schema version 3 reports a replay-sanitized invocation, basename-only input path,
@@ -80,6 +99,13 @@ only control decisions supplied with a current detector-supported locked
 observation. Acquisition, occlusion, prediction-only results, missing/malformed
 track IDs, stale results, and lost targets retain their state and identity
 metadata but have no invented center or controller-target measurement.
+
+Identity fields should be interpreted as run-local tracker behavior, not
+ground-truth identity accuracy. Unique IDs, acquisitions, short unsupported
+intervals, expirations, and protected-lock changes can expose association
+behavior, but BoT-SORT can still switch IDs or lose identity when detection,
+occlusion, appearance, or tracker configuration is unfavorable. The report
+does not establish long-term re-identification.
 
 Selector-state frame counts and ratios are the current evidence-safe summaries.
 Do not quote `selector_state_seconds` as evaluation evidence until the known
