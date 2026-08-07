@@ -184,26 +184,33 @@ watchdog timeout. These are design/tested safety properties, not certification.
 | Replay/evaluation | Strict atomic reports, path/credential redaction, finite metrics, and simulated-actuator replay implemented. | Unit/integration tested; measured finite replay evidence where identified |
 | Controlled tracking | Pan, tilt, target loss/reacquisition, and digital display zoom observed on the desk rig. | Qualitative physical observation |
 
-### Rejected α-β latency compensation
+### Rejected experiment: observed-only alpha-beta forward projection
 
-An optional current-observation-gated α-β predictor was implemented locally as
-an experiment. It estimated observed target-centroid velocity and projected the
-control point over a 40 ms horizon. It never permitted prediction-only actuation
-during loss or occlusion. It also could not reduce the actual capture,
-inference, serial, or actuator latency; it only changed the point presented to
-the existing controller.
+This was not a P-to-PI, P-to-PID, or controller-replacement experiment. The
+proportional controller remained unchanged. A local experimental branch
+estimated target-centroid position and velocity, then projected the observed
+target point forward before passing it to the existing controller. The tested
+40 ms projection horizon was compared with the 0 ms baseline.
 
-Physical A/B observation did not show better tracking. No numeric error
-improvement or regression is claimed because the trial did not establish one.
-The experiment was not pushed, merged, or retained in the public implementation.
+| Item                | Finding                                                                                |
+| ------------------- | -------------------------------------------------------------------------------------- |
+| Hypothesis          | Forward projection of the observed target center might reduce apparent trailing error. |
+| Baseline            | Existing proportional controller with a 0 ms projection horizon.                       |
+| Experimental change | Alpha-beta forward projection with a 40 ms horizon before the unchanged P controller.  |
+| Safety boundary     | No prediction-only actuation during target loss or occlusion.                          |
+| Pipeline latency    | Unchanged, as expected.                                                                |
+| Physical tracking   | No meaningful improvement observed in the controlled A/B comparison.                   |
+| Decision            | Retain the simpler proportional-control baseline.                                      |
 
-> Physical A/B testing did not demonstrate a tracking benefit sufficient to
-> justify the additional estimator state and tuning complexity, so the simpler
-> proportional-control baseline was retained.
+Projection was eligible only for a current, fresh, detector-supported locked
+observation. Prediction alone could not move the camera during occlusion or
+target loss. The experiment could not reduce capture, inference, serial, or
+actuator latency, and the supervised physical A/B comparison did not justify
+the additional estimator state and tuning complexity. It was not pushed,
+merged, or adopted into the public implementation. No numeric improvement or
+regression is claimed.
 
-Rejecting an unsupported feature is an engineering outcome: it preserved the
-smaller state space and easier safety argument until repeatable evidence can
-justify additional estimator behavior.
+> Physical A/B testing did not demonstrate a tracking benefit sufficient to justify the additional estimator state and tuning complexity, so the simpler proportional-control baseline was retained.
 
 ### Recorded-run boundary
 

@@ -93,12 +93,29 @@ or reduced portability. The chosen architecture delivers measurable closed-loop
 behavior while keeping the $60–80 prototype understandable, testable, and safe to
 bring up under direct supervision.
 
-An optional current-observation-gated α-β latency predictor was also evaluated
-locally and not published. It estimated centroid velocity and projected the
-current control point with a 40 ms horizon, but never enabled prediction-only
-motion. Prediction did not reduce capture, inference, serial, or actuator
-latency, and physical A/B observation did not establish a tracking benefit.
-“Physical A/B testing did not demonstrate a tracking benefit sufficient to
-justify the additional estimator state and tuning complexity, so the simpler
-proportional-control baseline was retained.” This is a rejected experiment, not
-a feature of the public repository.
+## Rejected experiment: observed-only alpha-beta forward projection
+
+This was not a controller-replacement experiment: the proportional controller
+remained unchanged. A local experimental branch estimated target-centroid
+position and velocity and projected the observed target point before passing it
+to that existing controller. The tested 40 ms horizon was compared with the
+0 ms baseline.
+
+| Item                | Finding                                                                                |
+| ------------------- | -------------------------------------------------------------------------------------- |
+| Hypothesis          | Forward projection of the observed target center might reduce apparent trailing error. |
+| Baseline            | Existing proportional controller with a 0 ms projection horizon.                       |
+| Experimental change | Alpha-beta forward projection with a 40 ms horizon before the unchanged P controller.  |
+| Safety boundary     | No prediction-only actuation during target loss or occlusion.                          |
+| Pipeline latency    | Unchanged, as expected.                                                                |
+| Physical tracking   | No meaningful improvement observed in the controlled A/B comparison.                   |
+| Decision            | Retain the simpler proportional-control baseline.                                      |
+
+Projection was eligible only for a current, fresh, detector-supported locked
+observation. Prediction alone could not move the camera during occlusion or
+target loss, nor could it reduce capture, inference, serial, or actuator
+latency. The controlled physical A/B comparison did not justify the additional
+estimator state and tuning complexity. The experiment was not pushed, merged,
+or adopted into the public baseline.
+
+> Physical A/B testing did not demonstrate a tracking benefit sufficient to justify the additional estimator state and tuning complexity, so the simpler proportional-control baseline was retained.

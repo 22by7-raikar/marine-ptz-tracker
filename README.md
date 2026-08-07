@@ -376,12 +376,33 @@ open-world performance.
 | PI/PID or model-based control | Deferred because the hobby mechanism has no measured position feedback and current evidence did not justify more controller state. |
 | Queued/lossless vision processing | Rejected for real-time control; capacity-one latest-value channels bound stale work. |
 | TensorRT, C++, or custom CUDA | Deferred until profiling shows the current Python/CUDA path is the limiting factor. |
-| 40 ms observed-only α-β latency compensation | Evaluated locally with current-observation gating. Physical A/B testing did not show sufficient benefit, so it was not pushed, merged, or retained. It did not reduce actual capture, inference, serial, or actuator latency. |
 
-The latency-predictor conclusion is an engineering trade-off, not a failed
-implementation: “Physical A/B testing did not demonstrate a tracking benefit
-sufficient to justify the additional estimator state and tuning complexity, so
-the simpler proportional-control baseline was retained.”
+### Rejected experiment: observed-only alpha-beta forward projection
+
+This was not a P-to-PI, P-to-PID, or controller-replacement experiment. The
+proportional controller remained unchanged. A local experimental branch
+estimated target-centroid position and velocity, then projected the observed
+target point forward before passing that point to the existing controller. The
+tested 40 ms projection horizon was compared with the 0 ms baseline.
+
+| Item                | Finding                                                                                |
+| ------------------- | -------------------------------------------------------------------------------------- |
+| Hypothesis          | Forward projection of the observed target center might reduce apparent trailing error. |
+| Baseline            | Existing proportional controller with a 0 ms projection horizon.                       |
+| Experimental change | Alpha-beta forward projection with a 40 ms horizon before the unchanged P controller.  |
+| Safety boundary     | No prediction-only actuation during target loss or occlusion.                          |
+| Pipeline latency    | Unchanged, as expected.                                                                |
+| Physical tracking   | No meaningful improvement observed in the controlled A/B comparison.                   |
+| Decision            | Retain the simpler proportional-control baseline.                                      |
+
+Projection was eligible only for a current, fresh, detector-supported locked
+observation. Prediction alone could not move the camera during occlusion or
+target loss, and it could not make capture, inference, serial communication, or
+the servos faster. The supervised physical A/B comparison did not justify the
+extra estimator state and tuning complexity. The experimental branch was not
+pushed, merged, or adopted into the public baseline.
+
+> Physical A/B testing did not demonstrate a tracking benefit sufficient to justify the additional estimator state and tuning complexity, so the simpler proportional-control baseline was retained.
 
 ## Responsible use
 

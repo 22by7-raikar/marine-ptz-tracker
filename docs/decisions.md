@@ -155,16 +155,21 @@ under occlusion, and depends on detector quality and tuning. The checked-in
 configuration keeps ReID disabled, avoiding a second model and any claim of
 long-term re-identification.
 
-## 2026-08-06: Retain proportional control after a local latency-prediction experiment
+## 2026-08-06: Rejected experiment: observed-only alpha-beta forward projection
 
-An optional current-observation-gated α-β predictor was implemented and tested
-locally with centroid velocity and a 40 ms projection horizon. It did not allow
-motion from prediction-only, occluded, or lost-target state, and it did not
-reduce the underlying capture, inference, serial, or actuator latency.
+This was not a controller-replacement experiment. The proportional controller
+remained unchanged. An optional predictor was implemented and tested locally:
+it estimated target-centroid position and velocity, then projected the current
+observed point with a 40 ms horizon before passing it to the existing controller.
+The baseline horizon was 0 ms. Projection required a current, fresh,
+detector-supported locked observation, so prediction alone could not cause
+motion during occlusion or target loss. It did not reduce the underlying
+capture, inference, serial, or actuator latency.
 
-Physical A/B observation did not demonstrate a tracking benefit sufficient to
-justify the estimator state and tuning complexity. The experiment was not
-pushed, merged, or retained; the public runtime continues to use the simpler
-bounded proportional controller. This decision does not claim that prediction
-is universally ineffective—only that this prototype produced insufficient
-evidence to justify it.
+The supervised physical A/B comparison did not demonstrate meaningful improved
+tracking. The experiment was not pushed, merged, or adopted; the public runtime
+continues to use the simpler bounded proportional controller. This decision
+does not claim that prediction is universally ineffective—only that this
+prototype produced insufficient evidence to justify it.
+
+> Physical A/B testing did not demonstrate a tracking benefit sufficient to justify the additional estimator state and tuning complexity, so the simpler proportional-control baseline was retained.
