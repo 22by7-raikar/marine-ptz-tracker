@@ -1,6 +1,5 @@
-# Verified deployment values. The Uno exposed no /dev/serial/by-id link when
-# checked on this host, so the currently verified /dev/ttyACM0 is retained.
-# Recheck the device identity after USB changes; serial ports are never auto-discovered.
+# Verified deployment values. Devices use stable by-id paths; serial ports are
+# never auto-discovered. Recheck both identities after hardware changes.
 runtime:
   mode: hardware
   telemetry_enabled: true
@@ -31,7 +30,7 @@ detection:
     - marine_target
 
 serial:
-  device: /dev/ttyACM0
+  device: /dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_9503331303135180C052-if00
   baudrate: 115200
   read_timeout_s: 0.25
   write_timeout_s: 0.25

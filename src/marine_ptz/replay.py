@@ -46,7 +46,7 @@ _PATH_ARGUMENTS = frozenset(
 
 
 class ReplayError(ValueError):
-    """Raised when replay settings or collected replay evidence are invalid."""
+    """Raised when replay settings or collected replay metrics are invalid."""
 
 
 class ReplayCancelled(RuntimeError):
@@ -241,7 +241,7 @@ class ThresholdResult:
 
 @dataclass(frozen=True, slots=True)
 class ReplayReport:
-    """Versioned acceptance evidence generated after a completed replay."""
+    """Versioned replay report generated after a completed replay."""
 
     timestamp_utc: str
     command: tuple[str, ...]

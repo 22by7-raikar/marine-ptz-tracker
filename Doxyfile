@@ -1,0 +1,47 @@
+# Doxygen configuration for the host package and Uno firmware.
+# Generate with `doxygen` from the repository root; output goes to the
+# Git-ignored build/doxygen/html/index.html. Graphs require Graphviz `dot`.
+# Only non-default settings are listed.
+
+PROJECT_NAME           = "Marine PTZ Tracker"
+PROJECT_BRIEF          = "Camera-driven pan/tilt tracking with an Arduino safety boundary"
+PROJECT_NUMBER         = 0.1.0
+OUTPUT_DIRECTORY       = build/doxygen
+
+INPUT                  = README.md \
+                         docs \
+                         src/marine_ptz \
+                         firmware/ptz_controller
+FILE_PATTERNS          = *.py *.h *.cpp *.ino *.md
+EXTENSION_MAPPING      = ino=C++
+RECURSIVE              = YES
+USE_MDFILE_AS_MAINPAGE = README.md
+IMAGE_PATH             = docs
+
+OPTIMIZE_OUTPUT_JAVA   = YES
+AUTOLINK_SUPPORT       = NO
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+EXTRACT_ANON_NSPACES   = YES
+HIDE_UNDOC_RELATIONS   = NO
+SOURCE_BROWSER         = YES
+STRIP_CODE_COMMENTS    = NO
+REFERENCED_BY_RELATION = YES
+REFERENCES_RELATION    = YES
+
+GENERATE_LATEX         = NO
+HTML_COLORSTYLE        = AUTO_LIGHT
+GENERATE_TREEVIEW      = YES
+MERMAID_RENDER_MODE    = CLIENT_SIDE
+
+HAVE_DOT               = YES
+DOT_IMAGE_FORMAT       = svg
+INTERACTIVE_SVG        = YES
+CALL_GRAPH             = YES
+CALLER_GRAPH           = YES
+UML_LOOK               = YES
+DOT_GRAPH_MAX_NODES    = 60
+
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_LOGFILE           = build/doxygen/warnings.log

@@ -1,3 +1,12 @@
+/**
+ * @file ptz_controller.ino
+ * @brief Arduino Uno sketch: binds the platform-neutral protocol to Serial
+ *        and the two Servo outputs.
+ *
+ * Each loop() services the watchdog, processes a bounded slice of received
+ * bytes, sends a bounded slice of the pending response, and services the
+ * watchdog again, so slow or continuous serial traffic cannot delay expiry.
+ */
 #include <Servo.h>
 #include <string.h>
 
@@ -11,14 +20,20 @@ Servo tiltServo;
 ProtocolState protocolState;
 ProtocolFramer protocolFramer;
 
+/// Response line plus CRLF, transmitted incrementally.
 char pendingTx[MAX_LINE_LENGTH + 2U];
 uint8_t pendingTxLength = 0U;
 uint8_t pendingTxOffset = 0U;
 
+/// True while part of the queued response is still unsent.
 bool hasPendingResponse() {
   return pendingTxOffset < pendingTxLength;
 }
 
+/**
+ * @brief Queue a response line (with CRLF) for transmission.
+ * @return false if another response is still pending; true if queued or empty.
+ */
 bool queueResponse(const ProtocolResult &result) {
   if (result.response[0] == '\0') {
     return true;
@@ -38,6 +53,7 @@ bool queueResponse(const ProtocolResult &result) {
   return true;
 }
 
+/// Send at most #MAX_TX_BYTES_PER_LOOP bytes, never more than the TX buffer accepts.
 void flushPendingResponseBounded() {
   if (!hasPendingResponse()) {
     return;
@@ -67,6 +83,7 @@ void flushPendingResponseBounded() {
   }
 }
 
+/// Apply a protocol side effect to the servos. Neutral is written before attach.
 void applyAction(const ProtocolResult &result) {
   switch (result.action) {
     case ACTION_ATTACH_CENTER:
@@ -96,6 +113,7 @@ void applyAction(const ProtocolResult &result) {
   }
 }
 
+/// Detach the outputs if the protocol watchdog has expired.
 void serviceWatchdog() {
   ProtocolResult result;
   protocolTickWatchdog(
@@ -105,6 +123,7 @@ void serviceWatchdog() {
   applyAction(result);
 }
 
+/// Consume up to #MAX_RX_BYTES_PER_LOOP bytes and at most one command; skipped while a response is pending.
 void processSerialBounded() {
   if (hasPendingResponse()) {
     return;
@@ -143,6 +162,7 @@ void processSerialBounded() {
   }
 }
 
+/// Start detached, open Serial, and queue the unsolicited READY line.
 void setup() {
   protocolInit(protocolState);
   protocolFramerInit(protocolFramer);
@@ -154,6 +174,7 @@ void setup() {
   queueResponse(startup);
 }
 
+/// One bounded scheduling pass; never blocks.
 void loop() {
   serviceWatchdog();
   processSerialBounded();

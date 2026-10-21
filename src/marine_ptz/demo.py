@@ -68,6 +68,7 @@ def run(config: AppConfig, *, steps: int, sleep: bool = True) -> None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run the synthetic tracking loop and return a process exit status."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--config",

@@ -1,15 +1,5 @@
 # Architecture
 
-## Deployment boundary
-
-The optional container layer packages the existing composition without moving
-hardware ownership out of its interfaces. Replay exposes no devices and uses
-simulated actuation. The profile-gated hardware template maps only explicit
-camera and serial paths and retains the runtime's `--arm-hardware` gate. A
-read-only preflight checks files, imports, CUDA availability, and supplied
-device path existence without opening a camera, serial transport, detector, or
-actuator. See [deployment and rollback](deployment.md).
-
 ## Responsibility split
 
 ```mermaid
@@ -37,10 +27,8 @@ flowchart TD
 ```
 
 The Arduino path is unavailable unless the explicit gate is satisfied. The
-diagram describes implemented software boundaries. Controlled tracking has
-provided camera, serial, servo, and recorded-demo observations, while a
-watchdog-disconnect experiment and longer soak evidence remain separate. The
-watchdog is a communication fallback, not an emergency stop.
+diagram describes implemented software boundaries. The watchdog is a
+communication fallback, not an emergency stop.
 
 ```text
 CameraSource -> Detector -> TargetSelector -> PTZController -> Actuator
@@ -64,6 +52,165 @@ actuation. Backend construction is centralized rather than spread through the
 tracking loop. `concurrent_runtime.py` contains only hardware-neutral packet,
 capacity-one channel, failure-mailbox, and metrics primitives; the composition
 and safety boundaries remain in `vision_cli.py`.
+
+## Module dependencies
+
+Arrows point from a module to what it imports. Hardware and vision libraries
+sit at the leaves and are imported lazily; `types` and `interfaces` have no
+dependencies.
+
+```mermaid
+flowchart LR
+    subgraph entry[Entry points]
+        demo
+        vision_cli
+        replay_cli
+        runtime_benchmark
+    end
+    subgraph policy[Policy]
+        tracking["tracking<br/>MarineTargetSelector<br/>ProportionalPTZController"]
+        digital_zoom
+        evaluation
+    end
+    subgraph adapters[Hardware and vision adapters]
+        opencv_source["opencv_source<br/>(cv2, lazy)"]
+        yolo_detector["yolo_detector<br/>(ultralytics, lazy)"]
+        serial_actuator
+        serial_transport["serial_transport<br/>(pyserial, lazy)"]
+        serial_protocol
+        video_recorder
+    end
+    subgraph core[Core]
+        types
+        interfaces
+        config
+    end
+
+    demo --> synthetic & tracking & actuators & config
+    vision_cli --> opencv_source & yolo_detector & tracking & digital_zoom
+    vision_cli --> concurrent_runtime & video_recorder & evaluation & actuators
+    vision_cli -. lazy .-> serial_actuator
+    replay_cli --> replay --> vision_cli
+    replay --> benchmark & evaluation
+    runtime_benchmark --> vision_cli & concurrent_runtime
+    serial_actuator --> serial_transport --> serial_protocol
+    serial_actuator --> cancellation
+    firmware_model --> serial_protocol
+    tracking & evaluation --> config
+    config & tracking & opencv_source & yolo_detector & actuators --> types
+    interfaces --> types
+```
+
+## Concurrent runtime
+
+One owner per resource. Each channel holds at most one value; a write replaces
+an unread value instead of queueing it.
+
+```mermaid
+flowchart LR
+    Cam[(Camera or<br/>finite video)]
+    subgraph T1[capture thread]
+        Cap[_capture_worker<br/>OpenCVSource.read]
+    end
+    subgraph T2[inference thread]
+        Inf[_inference_worker<br/>UltralyticsDetector<br/>+ BoT-SORT state]
+    end
+    subgraph Main[main thread]
+        Sel[MarineTargetSelector]
+        Ctl[ProportionalPTZController<br/>10 Hz MonotonicControlSchedule]
+        Act[ArduinoSerialActuator]
+        Gui[Display / annotation]
+    end
+    subgraph T3[recorder thread, optional]
+        Rec[_recorder_worker<br/>WallClockVideoRecorder]
+    end
+    Cam --> Cap
+    Cap -- "LatestValueChannel[FramePacket]" --> Inf
+    Inf -- "LatestValueChannel[DetectionPacket]" --> Sel
+    Sel --> Ctl --> Act
+    Sel --> Gui
+    Gui -- "LatestValueChannel" --> Rec
+    Act -- serial --> Uno[(Uno)]
+    Cap & Inf & Rec -. first failure .-> Box[WorkerFailureBox]
+    Box -. cancel + DISABLE .-> Main
+```
+
+A detection packet older than `runtime.result_freshness_s` at a control slot
+is a fault, not a "no target": the main thread stops commanding and cleans up.
+
+## Hardware startup and shutdown
+
+Everything that can fail slowly (camera, model load, first CUDA inference)
+completes while the servos are detached.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CLI as vision_cli
+    participant Src as OpenCVSource
+    participant Det as UltralyticsDetector
+    participant Act as ArduinoSerialActuator
+    participant Uno as Uno firmware
+    CLI->>Src: open, read one frame
+    CLI->>Det: load model, first inference
+    CLI->>Act: open()
+    Act->>Uno: (port open resets the board)
+    Uno-->>Act: READY 0 1 0.1.0
+    Act->>Uno: HELLO n (retried until deadline)
+    Uno-->>Act: READY n 1 0.1.0
+    Act->>Uno: DISABLE n+1
+    Uno-->>Act: ACK n+1 DISABLE 90 90
+    CLI->>Act: enable()  [only with --arm-hardware]
+    Act->>Uno: ENABLE n+2
+    Uno-->>Act: ACK n+2 ENABLE 90 90 (attach at neutral, arm watchdog)
+    CLI->>Act: apply(hold 90/90)
+    loop every 10 Hz control slot
+        Act->>Uno: SET seq pan tilt
+        Uno-->>Act: ACK seq SET pan tilt (refresh watchdog)
+    end
+    CLI->>Act: close() on q / Ctrl+C / fault
+    Act->>Uno: DISABLE
+    Uno-->>Act: ACK DISABLE (detach)
+```
+
+## Target selector states
+
+```mermaid
+stateDiagram-v2
+    [*] --> none
+    none --> acquiring: track ID at or above acquisition threshold
+    acquiring --> acquiring: different ID (count restarts at 1)
+    acquiring --> none: no qualifying detection
+    acquiring --> locked: same ID on 2 distinct frames
+    locked --> locked: current detection with locked ID
+    locked --> occluded: locked ID unsupported
+    occluded --> locked: same ID returns within 0.30 s
+    occluded --> none: over 0.30 s, lock released
+    none --> none: no qualifying detection
+    note right of occluded
+        Identity is protected, but no target
+        coordinates reach the controller;
+        lost-target policy applies.
+    end note
+```
+
+Only `locked` with a current detection yields a `Target`.
+
+## Firmware output states
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE: power-on / reset (detached)
+    IDLE --> ARMED: ENABLE (attach at neutral)
+    ARMED --> ARMED: accepted SET (write, refresh 1 s deadline)
+    ARMED --> IDLE: DISABLE (detach)
+    ARMED --> EXPIRED: 1 s without accepted SET (detach once)
+    EXPIRED --> ARMED: ENABLE
+    EXPIRED --> IDLE: DISABLE
+```
+
+`STATUS`, `CENTER`, rejected, malformed, and stale commands never refresh the
+deadline. Out-of-range angles are rejected in every state.
 
 ## Data flow
 
@@ -176,7 +323,7 @@ uploads firmware nor accesses serial hardware; compiled output remains in the
 runner temporary directory. This validates toolchain compatibility, not
 physical behavior.
 
-For `CameraSource.read()`, `None` means evidence indicates normal end-of-file
+For `CameraSource.read()`, `None` means the source indicates normal end-of-file
 for finite media. The OpenCV source compares usable frame-count and position
 metadata when available. Unknown-length media failures raise `MediaReadError`;
 recognized image files finish normally after their single successful frame.
@@ -236,7 +383,7 @@ overlap without introducing multiprocessing ownership or serialization.
 
 Capture and detection-result channels each retain only their newest value.
 Capacity one is intentional: a real-time controller benefits from current
-evidence, not a lossless backlog of increasingly stale frames. Finite OpenCV
+data, not a lossless backlog of increasingly stale frames. Finite OpenCV
 video must provide a validated positive declared FPS. Its capture worker reads
 one validation frame, then waits on an explicit inference-worker readiness
 barrier while that worker constructs the detector, performs representative
@@ -280,8 +427,8 @@ and only the main context constructs and calls the actuator. A physical
 concurrent run established the worker topology, approximately 30 Hz inference,
 approximately 10 Hz commands, watchdog stability, and bounded shutdown, but
 also exposed control-coupled 10 Hz rendering. The corrected render/control
-schedule is hardware-free tested and still requires controlled physical
-revalidation. Use `single` as the rollback until that evidence is recorded.
+schedule is covered by hardware-free tests but has not been re-run on the rig.
+Use `single` as the rollback until it has.
 
 Offline replay does not duplicate this loop. `run_vision()` has an optional
 observer that receives frozen start, applied-frame, processing-end, and normal

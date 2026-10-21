@@ -152,7 +152,9 @@ def test_hardware_config_loads_with_required_physical_fields() -> None:
         "/dev/v4l/by-id/usb-Innomaker_Innomaker-U20CAM-1080p-S1_SN0001-video-index0"
     )
     assert config.serial is not None
-    assert config.serial.device == "/dev/ttyACM0"
+    assert config.serial.device == (
+        "/dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_9503331303135180C052-if00"
+    )
     assert config.serial.baudrate == 115200
     assert config.serial.read_timeout_s == 0.25
     assert config.serial.write_timeout_s == 0.25
@@ -304,7 +306,11 @@ def test_arduino_serial_requires_serial_settings(
 @pytest.mark.parametrize(
     ("old", "new", "field"),
     [
-        ("device: /dev/ttyACM0", 'device: ""', "serial.device"),
+        (
+            "device: /dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_9503331303135180C052-if00",
+            'device: ""',
+            "serial.device",
+        ),
         ("baudrate: 115200", "baudrate: 12345", "serial.baudrate"),
         ("read_timeout_s: 0.25", "read_timeout_s: 0", "serial.read_timeout_s"),
         ("write_timeout_s: 0.25", "write_timeout_s: 11", "serial.write_timeout_s"),

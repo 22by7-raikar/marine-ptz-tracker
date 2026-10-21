@@ -51,6 +51,8 @@ from .yolo_detector import UltralyticsDetector, UltralyticsDetectorError
 
 @dataclass(frozen=True, slots=True)
 class VisionOptions:
+    """Resolved command-line options for one vision run."""
+
     source: int | str
     model: str
     device: str
@@ -2461,6 +2463,7 @@ def _termination_signals() -> Iterator[_TerminationRequest]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run the vision CLI and return a process exit status."""
     parser = _parser()
     args = parser.parse_args(argv)
     try:

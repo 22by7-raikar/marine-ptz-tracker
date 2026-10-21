@@ -57,6 +57,8 @@ class DegreeValueError(ProtocolError):
 
 
 class ErrorCode(str, Enum):
+    """Stable firmware error codes carried by `ERR` responses."""
+
     BAD_COMMAND = "BAD_COMMAND"
     BAD_TOKEN_COUNT = "BAD_TOKEN_COUNT"
     BAD_INTEGER = "BAD_INTEGER"
@@ -70,6 +72,8 @@ class ErrorCode(str, Enum):
 
 
 class WatchdogState(str, Enum):
+    """Firmware output watchdog state reported by `STATUS`."""
+
     IDLE = "IDLE"
     ARMED = "ARMED"
     EXPIRED = "EXPIRED"
@@ -77,6 +81,8 @@ class WatchdogState(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class HelloCommand:
+    """`HELLO <seq>`: start or restart a sequenced session."""
+
     sequence: int
 
     def __post_init__(self) -> None:
@@ -85,6 +91,8 @@ class HelloCommand:
 
 @dataclass(frozen=True, slots=True)
 class SetCommand:
+    """`SET <seq> <pan> <tilt>`: move to absolute physical degrees."""
+
     sequence: int
     pan_deg: int
     tilt_deg: int
@@ -97,6 +105,8 @@ class SetCommand:
 
 @dataclass(frozen=True, slots=True)
 class CenterCommand:
+    """`CENTER <seq>`: move to the firmware neutral pose."""
+
     sequence: int
 
     def __post_init__(self) -> None:
@@ -105,6 +115,8 @@ class CenterCommand:
 
 @dataclass(frozen=True, slots=True)
 class EnableCommand:
+    """`ENABLE <seq>`: attach servos at neutral and arm the watchdog."""
+
     sequence: int
 
     def __post_init__(self) -> None:
@@ -113,6 +125,8 @@ class EnableCommand:
 
 @dataclass(frozen=True, slots=True)
 class DisableCommand:
+    """`DISABLE <seq>`: detach servos immediately."""
+
     sequence: int
 
     def __post_init__(self) -> None:
@@ -121,6 +135,8 @@ class DisableCommand:
 
 @dataclass(frozen=True, slots=True)
 class StatusCommand:
+    """`STATUS <seq>`: query state without side effects."""
+
     sequence: int
 
     def __post_init__(self) -> None:
@@ -134,6 +150,8 @@ HostCommand: TypeAlias = (
 
 @dataclass(frozen=True, slots=True)
 class ReadyResponse:
+    """`READY <seq|0> <protocol> <firmware>`: startup or `HELLO` reply."""
+
     sequence: int
     protocol_version: str
     firmware_version: str
@@ -146,6 +164,8 @@ class ReadyResponse:
 
 @dataclass(frozen=True, slots=True)
 class AckResponse:
+    """`ACK <seq> <command> <pan> <tilt>`: accepted command and resulting angles."""
+
     sequence: int
     command: str
     pan_deg: int
@@ -161,6 +181,8 @@ class AckResponse:
 
 @dataclass(frozen=True, slots=True)
 class StatusResponse:
+    """`STATUS <seq> <enabled> <pan> <tilt> <watchdog>` reply."""
+
     sequence: int
     enabled: bool
     pan_deg: int
@@ -179,6 +201,8 @@ class StatusResponse:
 
 @dataclass(frozen=True, slots=True)
 class ErrorResponse:
+    """`ERR <seq|0> <code>`: rejected command."""
+
     sequence: int
     error_code: ErrorCode
 
@@ -266,6 +290,7 @@ class LineFramer:
 
 
 def validate_sequence(sequence: object) -> int:
+    """Return `sequence` if it is an int in 1..65535; otherwise raise `SequenceValueError`."""
     if isinstance(sequence, bool) or not isinstance(sequence, int):
         raise SequenceValueError("sequence must be an integer")
     if not MIN_SEQUENCE <= sequence <= MAX_SEQUENCE:
@@ -274,6 +299,7 @@ def validate_sequence(sequence: object) -> int:
 
 
 def validate_error_sequence(sequence: object) -> int:
+    """Like `validate_sequence`, but also allow 0 (no recoverable sequence)."""
     if isinstance(sequence, bool) or not isinstance(sequence, int):
         raise SequenceValueError("error sequence must be an integer")
     if not 0 <= sequence <= MAX_SEQUENCE:
@@ -282,11 +308,13 @@ def validate_error_sequence(sequence: object) -> int:
 
 
 def next_sequence(sequence: int) -> int:
+    """Return the successor sequence, wrapping 65535 to 1."""
     validate_sequence(sequence)
     return MIN_SEQUENCE if sequence == MAX_SEQUENCE else sequence + 1
 
 
 def validate_protocol_degree(value: object, field_name: str) -> int:
+    """Return `value` if it is an int within the 0..180 wire range; otherwise raise `DegreeValueError`."""
     if isinstance(value, bool) or not isinstance(value, int):
         raise DegreeValueError(f"{field_name} must be an integer number of degrees")
     if not MIN_PROTOCOL_DEGREES <= value <= MAX_PROTOCOL_DEGREES:
@@ -297,6 +325,7 @@ def validate_protocol_degree(value: object, field_name: str) -> int:
 
 
 def encode_command(command: HostCommand) -> bytes:
+    """Encode a host command as one LF-terminated ASCII frame."""
     if isinstance(command, HelloCommand):
         text = f"HELLO {command.sequence}"
     elif isinstance(command, SetCommand):
@@ -315,6 +344,7 @@ def encode_command(command: HostCommand) -> bytes:
 
 
 def encode_response(response: FirmwareResponse) -> bytes:
+    """Encode a firmware response as one CRLF-terminated ASCII frame."""
     if isinstance(response, ReadyResponse):
         text = f"READY {response.sequence} {response.protocol_version} {response.firmware_version}"
     elif isinstance(response, AckResponse):
@@ -332,6 +362,7 @@ def encode_response(response: FirmwareResponse) -> bytes:
 
 
 def parse_command(frame: bytes | str) -> HostCommand:
+    """Parse one host command frame with the firmware's strict grammar."""
     tokens = _tokens(frame)
     command_name = tokens[0]
     expected = {
@@ -364,6 +395,7 @@ def parse_command(frame: bytes | str) -> HostCommand:
 
 
 def parse_response(frame: bytes | str) -> FirmwareResponse:
+    """Parse one firmware response frame; raise `ProtocolError` if malformed."""
     tokens = _tokens(frame)
     response_name = tokens[0]
     if response_name == "READY":
