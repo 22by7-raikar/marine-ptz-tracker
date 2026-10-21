@@ -12,13 +12,6 @@ Camera, detector, target-selection, control, and actuator dependencies are repre
 
 The laptop performs vision and policy. The Arduino firmware validates its serial protocol, rejects unsafe angles, and drives servo signals. This keeps the time-sensitive actuator boundary simple and inspectable.
 
-## 2026-07-23: Defer model and transport choices (superseded)
-
-Superseded for the prototype vision milestone on 2026-07-24. At the time of
-this decision, no detection model, camera backend library, serial package, or
-firmware framework had been chosen. Vision choices were superseded on
-2026-07-24, and serial transport/protocol choices were superseded on 2026-07-25.
-
 ## 2026-07-24: Build the first slice with deterministic synthetic components
 
 The initial runnable loop uses a metadata-only camera, repeatable moving bounding boxes, proportional image-error control, and an in-memory actuator. Detection generation, target selection, control policy, and actuation remain separate so each can be replaced and tested independently.
@@ -27,25 +20,15 @@ The initial runnable loop uses a metadata-only camera, repeatable moving boundin
 
 PyYAML is the sole runtime dependency. Configuration is converted immediately into frozen dataclasses, rejects unknown keys and non-finite numeric values, enforces backend-required device settings, and reports field-qualified validation errors. This prevents untyped configuration mappings from spreading into tracking code.
 
-## 2026-07-24: Keep real vision optional and simulated at the actuator boundary (superseded)
+## 2026-07-24: Keep real vision optional
 
 OpenCV capture and Ultralytics YOLO are optional implementations loaded lazily.
 The base and synthetic packages do not import NumPy, OpenCV, Torch, or
-Ultralytics. The real vision CLI may access a camera and GPU but always sends
-control output to `SimulatedPTZActuator`; serial and Arduino actuation remain
-out of scope. The simulated-only composition choice was superseded on
-2026-07-26; optional dependency isolation remains current.
-
-The default model is lightweight `yolo11n.pt`. Classes are resolved from model
-metadata rather than fixed COCO IDs. The verified CUDA installation remains a
-separate first stage, and the project vision extra is installed under the
-cu128 constraints. Ultralytics licensing must be reviewed before distribution
-or commercial deployment.
-
-The selected prototype choices are OpenCV capture, Ultralytics inference, and
-`yolo11n.pt` as the configurable default model; callers may supply another
-model name or local path. This milestone deliberately retains simulated
-actuation even when the camera and detector are real.
+Ultralytics. Classes are resolved from model metadata rather than fixed COCO
+IDs. The verified CUDA PyTorch pair is installed first, and the vision extra is
+installed under the cu128 constraints so it cannot replace that pair.
+Ultralytics licensing must be reviewed before distribution or commercial
+deployment.
 
 ## 2026-07-25: Use a bounded ASCII serial protocol and detached watchdog state
 
@@ -62,10 +45,8 @@ Pyserial is isolated in an optional hardware extra and imported only by an
 explicit transport open. The actuator retains logical controller coordinates
 while direction/offset mapping produces bounded physical degrees. The firmware
 starts detached, attaches at neutral only after `ENABLE`, and detaches on
-`DISABLE` or watchdog expiry. This is a prototype communication safety policy,
-not an emergency-stop certification. Existing synthetic and vision composition
-continued to use simulated actuation until the explicitly armed runtime
-composition on 2026-07-26.
+`DISABLE` or watchdog expiry. This is a communication safety policy, not an
+emergency stop.
 
 Opening an Uno serial device may cause its normal auto-reset. The host uses a
 bounded boot grace, total handshake deadline, repeated identical `HELLO`, and a
@@ -104,7 +85,7 @@ motion safety boundaries, including the serial rate-limit wait, so an observed
 cancellation starts no new `ENABLE` or `SET`; an already submitted write may
 still complete. Primary runtime and cleanup failures are both reported. These
 interlocks reduce accidental motion; they do not create a safety-rated
-emergency-stop system or replace pending physical validation.
+emergency-stop system.
 
 ## 2026-07-26: Measure offline replay through a runtime observer
 
@@ -114,9 +95,8 @@ replay path fixes actuation to the existing simulated actuator and reuses the
 benchmark module's sanitized strict JSON and atomic writer. This keeps report
 metrics (target acquisition/loss, normalized error, command rate, and limit
 saturation) separate from the generic runtime while ensuring they describe the
-same selection and control behavior that production uses. No default acceptance
-limits are claimed; future toy-boat and physical evidence must set and record
-their own reviewed thresholds.
+same selection and control behavior that production uses. There are no default
+acceptance thresholds; each evaluation supplies its own.
 
 ## 2026-08-02: Split the one-class tugboat dataset by recording session
 
@@ -141,7 +121,7 @@ confidence varies. The optional BoT-SORT path therefore uses Ultralytics
 instance is the sole owner of the model and persistent tracker state; in
 concurrent mode that ownership stays entirely within the inference worker.
 
-Track IDs are evidence for a separate `MarineTargetSelector`, not authority to
+Track IDs are inputs to a separate `MarineTargetSelector`, not authority to
 actuate. New acquisition requires two current high-confidence observations by
 default. A locked ID may remain protected for a short unsupported interval, but
 the selector returns no cached or prediction-only coordinates during that
@@ -152,7 +132,7 @@ limit, and actuator safety boundaries.
 
 BoT-SORT remains optional because association can switch IDs, lose targets
 under occlusion, and depends on detector quality and tuning. The checked-in
-configuration keeps ReID disabled, avoiding a second model and any claim of
+configuration keeps ReID disabled, avoiding a second model; there is no
 long-term re-identification.
 
 ## 2026-08-06: Rejected experiment: observed-only alpha-beta forward projection
@@ -166,10 +146,19 @@ detector-supported locked observation, so prediction alone could not cause
 motion during occlusion or target loss. It did not reduce the underlying
 capture, inference, serial, or actuator latency.
 
-The supervised physical A/B comparison did not demonstrate meaningful improved
-tracking. The experiment was not pushed, merged, or adopted; the public runtime
-continues to use the simpler bounded proportional controller. This decision
-does not claim that prediction is universally ineffective—only that this
-prototype produced insufficient evidence to justify it.
+A physical A/B comparison showed no meaningful tracking improvement, so the
+extra estimator state and tuning were not worth carrying; the runtime keeps the
+simpler bounded proportional controller. With hobby servos and no position
+feedback, latency is dominated by capture, inference, and the mechanism, which
+projection cannot reduce. Prediction may still pay off on a stiffer,
+encoder-equipped mechanism.
 
-> Physical A/B testing did not demonstrate a tracking benefit sufficient to justify the additional estimator state and tuning complexity, so the simpler proportional-control baseline was retained.
+## 2026-10-20: Remove the container deployment and release-manifest path
+
+The Docker/Compose packaging, its read-only preflight, and the release-manifest
+tool packaged run artifacts into hashed release records. They were never used on
+the operating host, duplicated the native runtime's own fail-closed startup
+validation, and conflicted with the repository rule against Docker. They were
+removed together with their tests and documentation. The native Conda
+environment (`marine_ptz`) is the single supported runtime; `single` mode
+remains the rollback topology.

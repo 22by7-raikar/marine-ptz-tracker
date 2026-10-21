@@ -354,6 +354,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    """Run the single-versus-concurrent comparison and return a process exit status."""
     parser = _parser()
     args = parser.parse_args(argv)
     try:

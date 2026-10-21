@@ -1,4 +1,4 @@
-"""Run finite local media through the production loop and write acceptance evidence."""
+"""Run finite local media through the production loop and write a replay report."""
 
 from __future__ import annotations
 

@@ -55,6 +55,8 @@ _CANONICAL_INTEGER = re.compile(r"(?:0|-[1-9][0-9]*|[1-9][0-9]*)\Z")
 
 @dataclass(frozen=True, slots=True)
 class FirmwareSafetyConfig:
+    """Angle limits, neutral pose, and watchdog timeout for the firmware model."""
+
     pan_min_deg: int = 20
     pan_max_deg: int = 160
     tilt_min_deg: int = 35
@@ -380,6 +382,7 @@ def millis_deadline_reached(now_ms: int, deadline_ms: int) -> bool:
 
 
 def millis_add(now_ms: int, interval_ms: int) -> int:
+    """Add an interval to a uint32 `millis()` value with Arduino wraparound."""
     if isinstance(interval_ms, bool) or not isinstance(interval_ms, int):
         raise ValueError("interval_ms must be an integer")
     if not 0 <= interval_ms < _UINT32_HALF_RANGE:

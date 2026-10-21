@@ -19,6 +19,8 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class RuntimeConfig:
+    """Runtime mode, telemetry, execution topology, and result freshness limit."""
+
     mode: str
     telemetry_enabled: bool
     execution_mode: str
@@ -27,6 +29,8 @@ class RuntimeConfig:
 
 @dataclass(frozen=True, slots=True)
 class CameraConfig:
+    """Camera source, device path, and requested capture format."""
+
     source: str
     width: int
     height: int
@@ -36,6 +40,8 @@ class CameraConfig:
 
 @dataclass(frozen=True, slots=True)
 class DetectionConfig:
+    """Detector model, thresholds, and optional BoT-SORT tracker settings."""
+
     backend: str
     confidence_threshold: float
     target_labels: tuple[str, ...]
@@ -52,6 +58,8 @@ class DetectionConfig:
 
 @dataclass(frozen=True, slots=True)
 class ActuatorConfig:
+    """Actuator backend and logical pan/tilt limits and start pose."""
+
     backend: str
     pan_limits: AngleLimits
     tilt_limits: AngleLimits
@@ -61,6 +69,8 @@ class ActuatorConfig:
 
 @dataclass(frozen=True, slots=True)
 class TrackingConfig:
+    """Proportional controller gains, limits, rate, and lost-target policy."""
+
     deadband_px: float
     proportional_gain: float
     max_step_deg: float
@@ -70,6 +80,8 @@ class TrackingConfig:
 
 @dataclass(frozen=True, slots=True)
 class SerialConfig:
+    """Arduino serial link timing plus the logical-to-physical angle mapping and limits."""
+
     device: str
     baudrate: int
     read_timeout_s: float
@@ -92,6 +104,8 @@ class SerialConfig:
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:
+    """Validated, immutable configuration for one run."""
+
     runtime: RuntimeConfig
     camera: CameraConfig
     detection: DetectionConfig

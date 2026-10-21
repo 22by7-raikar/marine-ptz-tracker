@@ -1,11 +1,10 @@
 # Arduino PTZ controller protocol
 
-This directory contains the compile-verified firmware for an Arduino Uno
-R3-compatible controller and two hobby positional servos. The platform-neutral
-protocol core is compiled and executed by host CI, the sketch compiles for the
-Uno, and upload, handshake, and bounded integrated movement have been observed
-on the delivered rig. This is not a qualification of exact servo models,
-current draw, watchdog-disconnect timing, long-duration behavior, or safety.
+Firmware for an Arduino Uno R3-compatible controller driving two hobby
+positional servos. The platform-neutral protocol core is compiled and executed
+by host CI against shared golden vectors, and the sketch compiles for the Uno.
+Servo current draw, watchdog-disconnect timing, and long-duration behavior
+have not been characterized.
 
 ## Wire format
 
@@ -122,7 +121,7 @@ the startup policy deliberately tolerates the normal reset:
 5. Require a correlated `DISABLE` acknowledgement.
 6. Mark the host connected only after both correlated steps succeed.
 
-Prototype defaults are a 2-second boot grace, 4-second total handshake
+Defaults are a 2-second boot grace, 4-second total handshake
 deadline, and 0.25-second retry interval. These startup values are separate
 from ordinary 0.25-second command reads and two command retries.
 
@@ -201,14 +200,12 @@ installs packages or uploads a sketch. `ARDUINO_CLI` and
 `ARDUINO_CLI_CONFIG_DIR` can select non-default local locations without
 embedding machine-specific paths in the script.
 
-The pre-remediation result was 7,856 bytes of flash (24%) and 705 bytes of
-static RAM (34%). The current result, including the rejected-`SET` retry cache,
-is 8,120 bytes of flash (25%) and 715 bytes of static RAM (34%). Current
-warnings come only from the official AVR core's `new.cpp`; project sources
-produce no warnings. Prior remote CI revisions passed; the final committed
-revision must use CI as the authoritative clean-environment result. Upload and
-controlled integrated movement have been observed, while watchdog-disconnect,
-electrical, mechanical-soak, and broader operating evidence remain pending.
+The build uses 8,120 bytes of flash (25%) and 715 bytes of static RAM (34%).
+Warnings come only from the official AVR core's `new.cpp`; project sources
+produce none. Upload and controlled integrated movement have been observed;
+watchdog-disconnect timing, electrical, and long-duration behavior have not
+been characterized. See [hardware](../../docs/hardware.md#known-hardware-gaps) for
+open firmware findings.
 
 Servo power must come from the external regulated 5 V supply with a common
-Arduino ground. See [wiring](../../docs/wiring.md) before applying power.
+Arduino ground. See [hardware](../../docs/hardware.md) before applying power.

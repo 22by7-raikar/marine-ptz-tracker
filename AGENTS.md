@@ -10,8 +10,8 @@
 ## Build and test
 
 - Target Python 3.10+ and use the `src/` layout.
-- Run `python3.10 tools/smoke_check.py` after Python changes.
-- Run `python3.10 -m pytest` when pytest is available. Tests must use fakes and must not require a camera, GPU, Arduino, or serial device.
+- Use the `marine_ptz` Conda environment. Run `python tools/smoke_check.py` after Python changes.
+- Run `python -m pytest` when pytest is available. Tests must use fakes and must not require a camera, GPU, Arduino, or serial device.
 - Keep configuration changes synchronized with the relevant documentation.
 - Preserve the verified host vision stack: torch 2.11.0+cu128, torchvision 0.26.0+cu128, ultralytics 8.4.104, and opencv-python 5.0.0.93. Follow the README's two-stage constrained installation; never use an unconstrained command that may replace the cu128 pair.
 - A coding-agent sandbox may not expose CUDA even when the host does. Do not change implementation or dependencies in response to sandbox-only CUDA unavailability.

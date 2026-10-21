@@ -78,8 +78,7 @@ With Arduino software stopped and servo power disabled, recheck the configured
 camera identity. Record session 01 as 1920×1080, 30 FPS MJPEG:
 
 ```bash
-conda run --no-capture-output -n marine_ptz \
-  python tools/record_dataset.py \
+python tools/record_dataset.py \
   --config configs/hardware.yaml \
   --output captures/tugboat/session-01.avi \
   --duration 60 \
@@ -97,7 +96,7 @@ with `session-02.avi` through `session-10.avi`.
 Preview the deterministic selection without writing:
 
 ```bash
-conda run -n marine_ptz python tools/extract_frames.py \
+python tools/extract_frames.py \
   --source captures/tugboat/session-01.avi \
   --output-dir data/tugboat/staging/session-01/images \
   --session session-01 \
@@ -161,7 +160,7 @@ does not call a Platform API or use URLs embedded in the export.
 Validate the export and its exact-basename matches without writing:
 
 ```bash
-conda run -n marine_ptz python tools/import_ultralytics_ndjson.py \
+python tools/import_ultralytics_ndjson.py \
   --ndjson data/tugboat/platform-export/tugboat.ndjson \
   --source-staging-root data/tugboat/staging \
   --output-staging-root data/tugboat/platform-imported \
@@ -175,10 +174,17 @@ skipped. Each exported filename is reduced to its exact basename and must match
 exactly one image below `data/tugboat/staging/<session>/images/`. Duplicate,
 missing, or ambiguous basenames fail the complete import.
 
+Rows without boxes are skipped by default. Pass
+`--include-unannotated-as-negatives` only when **every** unboxed image in the
+export has been manually reviewed and confirmed not to contain the tugboat
+(hands, faces, shadows, low-light backgrounds). Those rows become
+`reviewed_negative` manifest entries with zero-byte labels. Never use it to
+bulk-convert unreviewed images.
+
 After resolving every failure, remove `--dry-run`:
 
 ```bash
-conda run -n marine_ptz python tools/import_ultralytics_ndjson.py \
+python tools/import_ultralytics_ndjson.py \
   --ndjson data/tugboat/platform-export/tugboat.ndjson \
   --source-staging-root data/tugboat/staging \
   --output-staging-root data/tugboat/platform-imported
@@ -213,7 +219,7 @@ First perform a non-writing validation and show the deterministic 70/20/10
 whole-session allocation:
 
 ```bash
-conda run -n marine_ptz python tools/prepare_tugboat_dataset.py \
+python tools/prepare_tugboat_dataset.py \
   --staging-root data/tugboat/platform-imported \
   --output-root data/tugboat \
   --data data/tugboat/data.yaml \
@@ -224,7 +230,7 @@ conda run -n marine_ptz python tools/prepare_tugboat_dataset.py \
 After fixing every reported failure, remove `--dry-run`:
 
 ```bash
-conda run -n marine_ptz python tools/prepare_tugboat_dataset.py \
+python tools/prepare_tugboat_dataset.py \
   --staging-root data/tugboat/platform-imported \
   --output-root data/tugboat \
   --data data/tugboat/data.yaml \
@@ -242,8 +248,7 @@ generated split deliberately before rerunning; the tool never cleans it.
 Use a verified local YOLO11n starting checkpoint to avoid a download:
 
 ```bash
-conda run --no-capture-output -n marine_ptz \
-  python tools/train_tugboat.py \
+python tools/train_tugboat.py \
   --data data/tugboat/data.yaml \
   --model /path/to/local/yolo11n.pt \
   --epochs 50 \
@@ -263,8 +268,7 @@ download when it is not cached; provide the local path above for offline work.
 ## 7. Evaluate only on the held-out test sessions
 
 ```bash
-conda run --no-capture-output -n marine_ptz \
-  python tools/evaluate_tugboat.py \
+python tools/evaluate_tugboat.py \
   --model runs/tugboat/yolo11n-marine-target/weights/best.pt \
   --data data/tugboat/data.yaml \
   --image-size 640 \
@@ -282,147 +286,5 @@ predictions plus YOLO prediction text under
 false negatives, tightness, lighting, distance, and occlusion rather than
 selecting a checkpoint solely by one aggregate metric.
 
-## 8. Run the custom model without physical actuation first
-
-```bash
-conda run --no-capture-output -n marine_ptz \
-  python -m marine_ptz.vision_cli \
-  --config configs/hardware.yaml \
-  --model runs/tugboat/yolo11n-marine-target/weights/best.pt \
-  --device cuda:0 \
-  --target-class marine_target \
-  --actuator-backend simulated \
-  --display
-```
-
-Only after representative live-camera and offline replay evidence is reviewed
-should the separately gated Arduino backend be considered. Custom-model metrics
-remain model/media evidence; they do not prove physical tracking safety.
-
-## Version 2 reviewed-negative workflow
-
-Version 1 artifacts are immutable inputs to this workflow. The cumulative v2
-export is `data/tugboat/platform_export/tugboat-marine-target_v2.ndjson`; import
-it only to the new `data/tugboat/platform-imported-v2` tree and prepare it only
-under `data/tugboat-v2`.
-
-By default, the importer continues to skip every zero-box row. The option
-`--include-unannotated-as-negatives` is deliberately explicit: **use it only
-when every unboxed exported image has been manually reviewed and confirmed not
-to contain the tugboat**. It is appropriate for the reviewed forearm, hand,
-face, person, shadow, and low-light background images described for v2. Never
-use it to bulk-convert arbitrary unlabeled images into negatives.
-
-Validate the cumulative export without writing:
-
-```bash
-conda run -n marine_ptz python tools/import_ultralytics_ndjson.py \
-  --ndjson data/tugboat/platform_export/tugboat-marine-target_v2.ndjson \
-  --source-staging-root data/tugboat/staging \
-  --output-staging-root data/tugboat/platform-imported-v2 \
-  --include-unannotated-as-negatives \
-  --dry-run
-```
-
-Review the positive, reviewed-negative, skipped, label, and session counts.
-Then publish the new staging tree:
-
-```bash
-conda run -n marine_ptz python tools/import_ultralytics_ndjson.py \
-  --ndjson data/tugboat/platform_export/tugboat-marine-target_v2.ndjson \
-  --source-staging-root data/tugboat/staging \
-  --output-staging-root data/tugboat/platform-imported-v2 \
-  --include-unannotated-as-negatives
-```
-
-Positive manifest entries are marked `positive`. Reviewed zero-box entries are
-marked `reviewed_negative` and receive a zero-byte YOLO label. Exact-basename
-resolution and every existing metadata, annotation, preflight, and atomic
-publication check apply to both kinds.
-
-Plan the separate v2 dataset and its new YAML:
-
-```bash
-conda run -n marine_ptz python tools/prepare_tugboat_dataset.py \
-  --staging-root data/tugboat/platform-imported-v2 \
-  --output-root data/tugboat-v2 \
-  --data data/tugboat-v2/data.yaml \
-  --seed 20260802 \
-  --dry-run
-```
-
-When the YAML is absent, dry-run writes nothing. The real command creates a
-canonical one-class YAML using only relative v2 paths. If it already exists, it
-must validate and is never overwritten. Prepare after reviewing the session
-allocation:
-
-```bash
-conda run -n marine_ptz python tools/prepare_tugboat_dataset.py \
-  --staging-root data/tugboat/platform-imported-v2 \
-  --output-root data/tugboat-v2 \
-  --data data/tugboat-v2/data.yaml \
-  --seed 20260802
-```
-
-Train with the required v2 run name and a verified local starting checkpoint:
-
-```bash
-conda run --no-capture-output -n marine_ptz \
-  python tools/train_tugboat.py \
-  --data data/tugboat-v2/data.yaml \
-  --model /path/to/local/yolo11n.pt \
-  --epochs 50 \
-  --image-size 640 \
-  --device cuda:0 \
-  --batch auto \
-  --project runs/tugboat \
-  --name yolo11n-marine-target-v2
-```
-
-Evaluate without reusing v1 report or prediction directories:
-
-```bash
-conda run --no-capture-output -n marine_ptz \
-  python tools/evaluate_tugboat.py \
-  --model runs/tugboat/yolo11n-marine-target-v2/weights/best.pt \
-  --data data/tugboat-v2/data.yaml \
-  --image-size 640 \
-  --device cuda:0 \
-  --batch 8 \
-  --project runs/tugboat-evaluation \
-  --name heldout-test-v2 \
-  --report artifacts/evaluation/tugboat-v2-test.json
-```
-
-Run the v2 weights with simulated actuation first:
-
-```bash
-conda run --no-capture-output -n marine_ptz \
-  python -m marine_ptz.vision_cli \
-  --config configs/hardware.yaml \
-  --model runs/tugboat/yolo11n-marine-target-v2/weights/best.pt \
-  --device cuda:0 \
-  --target-class marine_target \
-  --actuator-backend simulated \
-  --display
-```
-
-Only after v2 held-out review, simulated live tracking, wiring, calibration,
-limits, and the physical runbook are approved may an operator use the explicitly
-armed physical form:
-
-```bash
-conda run --no-capture-output -n marine_ptz \
-  python -m marine_ptz.vision_cli \
-  --config configs/hardware.yaml \
-  --model runs/tugboat/yolo11n-marine-target-v2/weights/best.pt \
-  --device cuda:0 \
-  --target-class marine_target \
-  --actuator-backend arduino_serial \
-  --serial-port /dev/ttyACM0 \
-  --arm-hardware \
-  --display
-```
-
-The physical command remains pending operator validation. Training and software
-tests do not prove physical tracking or servo safety.
+Next, run the model with simulated actuation before arming hardware; see
+[operations](operations.md).
